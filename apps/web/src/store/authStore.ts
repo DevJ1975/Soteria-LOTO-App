@@ -19,7 +19,18 @@ export const useAuthStore = create<AuthState>((set) => ({
   loadSession: async () => {
     try {
       const token = localStorage.getItem('accessToken');
-      if (!token) { set({ isLoading: false }); return; }
+      if (!token) {
+        // Auto-login with demo credentials
+        const { data } = await apiClient.post('/auth/login', {
+          email: 'admin@snak-king.com',
+          password: 'SoteriaDemo1!',
+        });
+        const { accessToken, refreshToken, user } = data.data;
+        localStorage.setItem('accessToken', accessToken);
+        localStorage.setItem('refreshToken', refreshToken);
+        set({ user, isAuthenticated: true, isLoading: false });
+        return;
+      }
       const { data } = await apiClient.get('/auth/me');
       set({ user: data.data, isAuthenticated: true, isLoading: false });
     } catch {
