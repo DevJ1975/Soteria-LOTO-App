@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "Soteria LOTO",
+    "slug": "soteria-loto",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "scheme": "soteria",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#CC0000"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.soteria.loto",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Soteria LOTO uses the camera to photograph equipment, isolation points, and nameplates for LOTO procedures.",
+        "NSPhotoLibraryUsageDescription": "Soteria LOTO can access your photo library to select equipment photos.",
+        "NSPhotoLibraryAddUsageDescription": "Soteria LOTO saves equipment photos to your library."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#CC0000"
+      },
+      "package": "com.soteria.loto",
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Soteria LOTO to access your camera."
+        }
+      ],
+      [
+        "expo-barcode-scanner",
+        {
+          "cameraPermission": "Allow Soteria LOTO to use the camera for QR code scanning."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

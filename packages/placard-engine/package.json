@@ -1,0 +1,20 @@
+{
+  "name": "@soteria/placard-engine",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "@soteria/shared": "*",
+    "pdfkit": "^0.14.0"
+  },
+  "devDependencies": {
+    "@types/pdfkit": "^0.13.3",
+    "typescript": "^5.3.3"
+  }
+}

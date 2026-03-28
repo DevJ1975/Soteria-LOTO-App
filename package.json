@@ -1,0 +1,31 @@
+{
+  "name": "soteria-loto-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Soteria LOTO — Field-first Lockout/Tagout procedure management platform",
+  "workspaces": [
+    "apps/backend",
+    "apps/web",
+    "packages/shared",
+    "packages/placard-engine"
+  ],
+  "scripts": {
+    "backend": "yarn workspace @soteria/backend dev",
+    "web": "yarn workspace @soteria/web dev",
+    "build:backend": "yarn workspace @soteria/backend build",
+    "build:web": "yarn workspace @soteria/web build",
+    "build:shared": "yarn workspace @soteria/shared build",
+    "build:engine": "yarn workspace @soteria/placard-engine build",
+    "test": "yarn workspaces run test",
+    "lint": "yarn workspaces run lint",
+    "type-check": "yarn workspaces run type-check"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@typescript-eslint/eslint-plugin": "^6.18.0",
+    "@typescript-eslint/parser": "^6.18.0",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.1.1"
+  }
+}
