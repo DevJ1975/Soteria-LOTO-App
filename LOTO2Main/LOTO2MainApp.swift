@@ -2,31 +2,33 @@
 //  LOTO2MainApp.swift
 //  LOTO2Main
 //
-//  Created by Jay.Dev on 4/13/26.
+//  App entry point. Bootstraps PlacardViewModel into the SwiftUI environment.
+//  No Microsoft/MSAL dependencies — uses Supabase for data and storage.
 //
 
 import SwiftUI
-import SwiftData
 
 @main
 struct LOTO2MainApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @State private var placardVM    = PlacardViewModel()
+    @State private var showSplash   = true
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ZStack {
+                ContentView()
+                    .environment(placardVM)
+
+                if showSplash {
+                    SplashView {
+                        showSplash = false
+                    }
+                    .zIndex(1)
+                    .transition(.opacity)
+                }
+            }
+            .task { await placardVM.loadEquipment() }
         }
-        .modelContainer(sharedModelContainer)
     }
 }

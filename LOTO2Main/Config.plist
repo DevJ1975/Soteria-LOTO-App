@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        LOTO Placard Generator — Supabase Configuration
+        ================================================
+        SupabaseURL   : Your project URL (Settings → API → Project URL)
+        SupabaseAnonKey : Your anon/public key (Settings → API → Project API keys → anon public)
+
+        Storage bucket name must be: loto-photos
+        Table name must be: equipment
+    -->
+    <key>SupabaseURL</key>
+    <string>https://zwtnpyjifbdytlektxlc.supabase.co</string>
+
+    <key>SupabaseAnonKey</key>
+    <string>sb_publishable_ogv8qmif_7OllAeHqdBWxg_ZMF3grgw</string>
+</dict>
+</plist>
