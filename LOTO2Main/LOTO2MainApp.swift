@@ -28,7 +28,10 @@ struct LOTO2MainApp: App {
                     .transition(.opacity)
                 }
             }
-            .task { await placardVM.loadEquipment() }
+            .task {
+                await placardVM.loadEquipment()
+                placardVM.startNetworkSync()
+            }
         }
     }
 }

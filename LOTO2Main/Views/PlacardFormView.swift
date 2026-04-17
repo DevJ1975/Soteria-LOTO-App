@@ -27,8 +27,13 @@ struct PlacardFormView: View {
     @State private var showEquipCamera   = false
     @State private var showIsoCamera     = false
 
+    // Re-shoot confirmation
+    @State private var reshootTarget:    PhotoTarget? = nil
+
     // Preview sheet
     @State private var showPreview       = false
+
+    private enum PhotoTarget { case equipment, isolation }
 
     var body: some View {
         NavigationStack {
@@ -65,6 +70,26 @@ struct PlacardFormView: View {
             }
             .onChange(of: isoPickerItem) { _, item in
                 Task { await loadPhoto(item: item, isEquipment: false) }
+            }
+            .confirmationDialog(
+                "A photo already exists for this equipment. Replace it?",
+                isPresented: Binding(
+                    get: { reshootTarget != nil },
+                    set: { if !$0 { reshootTarget = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Take New Photo") {
+                    if reshootTarget == .equipment { showEquipCamera = true }
+                    else { showIsoCamera = true }
+                    reshootTarget = nil
+                }
+                Button("Choose from Library") {
+                    if reshootTarget == .equipment { showEquipPicker = true }
+                    else { showIsoPicker = true }
+                    reshootTarget = nil
+                }
+                Button("Cancel", role: .cancel) { reshootTarget = nil }
             }
         }
         .tint(Color.brandDeepIndigo)
@@ -200,11 +225,12 @@ struct PlacardFormView: View {
     private var photoRow: some View {
         HStack(spacing: 0) {
             photoSlot(
-                image: vm.equipmentPhoto,
+                newImage: vm.equipmentPhoto,
+                existingImage: vm.existingEquipPhoto,
                 label: "Photo of Equipment",
                 systemIcon: "camera.fill",
-                onCamera: { showEquipCamera = true },
-                onLibrary: { showEquipPicker = true }
+                hasUploaded: equipment.equipPhotoUrl != nil,
+                target: .equipment
             )
             .photosPicker(isPresented: $showEquipPicker,
                           selection: $equipPickerItem,
@@ -214,53 +240,87 @@ struct PlacardFormView: View {
             Divider()
 
             photoSlot(
-                image: vm.disconnectPhoto,
+                newImage: vm.disconnectPhoto,
+                existingImage: vm.existingIsoPhoto,
                 label: "Photo of Isolation / Disconnect",
                 systemIcon: "bolt.slash.fill",
-                onCamera: { showIsoCamera = true },
-                onLibrary: { showIsoPicker = true }
+                hasUploaded: equipment.isoPhotoUrl != nil,
+                target: .isolation
             )
             .photosPicker(isPresented: $showIsoPicker,
                           selection: $isoPickerItem,
                           matching: .images)
             .frame(maxWidth: .infinity)
         }
-        .frame(height: 160)
+        .frame(height: 170)
     }
 
-    private func photoSlot(image: UIImage?, label: String, systemIcon: String,
-                            onCamera: @escaping () -> Void, onLibrary: @escaping () -> Void) -> some View {
-        Menu {
-            Button { onCamera() } label: {
-                Label("Take Photo", systemImage: "camera")
-            }
-            Button { onLibrary() } label: {
-                Label("Choose from Library", systemImage: "photo.on.rectangle")
+    private func photoSlot(newImage: UIImage?, existingImage: UIImage?,
+                            label: String, systemIcon: String,
+                            hasUploaded: Bool, target: PhotoTarget) -> some View {
+        // Display priority: newly captured > previously uploaded > placeholder
+        let displayImage = newImage ?? existingImage
+
+        return Button {
+            if hasUploaded && newImage == nil {
+                // Already has an uploaded photo — confirm before replacing
+                reshootTarget = target
+            } else {
+                if target == .equipment { showEquipCamera = true }
+                else { showIsoCamera = true }
             }
         } label: {
-            VStack(spacing: 6) {
-                if let img = image {
-                    Image(uiImage: img)
-                        .resizable().scaledToFill()
-                        .frame(height: 120).clipped()
-                } else {
-                    ZStack {
-                        Color(UIColor.systemGray6).frame(height: 120)
-                        VStack(spacing: 6) {
-                            Image(systemName: systemIcon)
-                                .font(.title2).foregroundStyle(Color.brandDeepIndigo.opacity(0.7))
-                            Text("Tap to photograph")
-                                .font(.caption2).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                ZStack(alignment: .topTrailing) {
+                    if let img = displayImage {
+                        Image(uiImage: img)
+                            .resizable().scaledToFill()
+                            .frame(height: 130).clipped()
+                    } else if vm.isLoadingExistingPhotos {
+                        Color(UIColor.systemGray6).frame(height: 130)
+                            .overlay(ProgressView())
+                    } else {
+                        ZStack {
+                            Color(UIColor.systemGray6).frame(height: 130)
+                            VStack(spacing: 6) {
+                                Image(systemName: systemIcon)
+                                    .font(.title2).foregroundStyle(Color.brandDeepIndigo.opacity(0.7))
+                                Text("Tap to photograph")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
                         }
                     }
+
+                    // Badge: new photo taken vs existing uploaded
+                    if newImage != nil {
+                        Text("NEW").font(.system(size: 7, weight: .black))
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(Color.statusSuccess)
+                            .foregroundStyle(.white).clipShape(Capsule())
+                            .padding(4)
+                    } else if existingImage != nil {
+                        Image(systemName: "checkmark.icloud.fill")
+                            .font(.caption).foregroundStyle(Color.statusSuccess)
+                            .padding(6)
+                    }
                 }
+
                 Text(label)
                     .font(.system(size: 8, weight: .bold))
                     .multilineTextAlignment(.center)
-                    .padding(.bottom, 4)
+                    .padding(.vertical, 4)
             }
         }
         .buttonStyle(.plain)
+        // Long press always allows camera or library without warning
+        .contextMenu {
+            Button { if target == .equipment { showEquipCamera = true } else { showIsoCamera = true } } label: {
+                Label("Take New Photo", systemImage: "camera")
+            }
+            Button { if target == .equipment { showEquipPicker = true } else { showIsoPicker = true } } label: {
+                Label("Choose from Library", systemImage: "photo.on.rectangle")
+            }
+        }
     }
 
     // MARK: - Energy Table
@@ -371,9 +431,26 @@ struct PlacardFormView: View {
     private var navToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) { Button("Close") { dismiss() } }
 
+        // Next equipment in the current filtered list
+        if let next = vm.nextEquipment {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    vm.select(next)
+                } label: {
+                    Label(next.equipmentId, systemImage: "chevron.right")
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption.bold())
+                }
+            }
+        }
+
         ToolbarItem(placement: .topBarTrailing) {
             Button {
-                Task { await vm.generatePDF(); showPreview = true }
+                Task {
+                    await vm.generatePDF()
+                    showPreview = true
+                }
             } label: {
                 if vm.isGeneratingPDF {
                     ProgressView().scaleEffect(0.8)

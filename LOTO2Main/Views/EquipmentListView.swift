@@ -16,23 +16,74 @@ struct EquipmentListView: View {
     @State private var selectedEquipment:  Equipment?
     @State private var showBatchPrint      = false
     @State private var columnVisibility    = NavigationSplitViewVisibility.all
+    @State private var statusFilter:       StatusFilter = .all
+
+    enum StatusFilter: String, CaseIterable {
+        case all      = "All"
+        case missing  = "Missing"
+        case partial  = "Partial"
+        case complete = "Complete"
+    }
+
+    private var network: NetworkMonitor { NetworkMonitor.shared }
+    private var offline: OfflineStorageService { OfflineStorageService.shared }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            // MARK: Sidebar — Departments
-            sidebarColumn
-        } content: {
-            // MARK: Content — Equipment Rows
-            equipmentColumn
-        } detail: {
-            // MARK: Detail — Placard Form
-            detailColumn
+        VStack(spacing: 0) {
+            // Offline/pending banner — shown when no connection or uploads queued
+            if !network.isConnected || offline.pendingCount > 0 {
+                offlineBanner
+            }
+
+            NavigationSplitView(columnVisibility: $columnVisibility) {
+                sidebarColumn
+            } content: {
+                equipmentColumn
+            } detail: {
+                detailColumn
+            }
+            .navigationSplitViewStyle(.balanced)
         }
-        .navigationSplitViewStyle(.balanced)
         .sheet(isPresented: $showBatchPrint) {
             BatchPrintView().environment(vm)
         }
         .tint(Color.brandDeepIndigo)
+    }
+
+    // MARK: - Offline Banner
+
+    private var offlineBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: network.isConnected ? "arrow.triangle.2.circlepath" : "wifi.slash")
+                .font(.caption.bold())
+
+            if !network.isConnected {
+                Text("Offline — photos will sync when connected")
+                    .font(.caption.bold())
+            } else {
+                Text("Syncing \(offline.pendingCount) pending upload\(offline.pendingCount == 1 ? "" : "s")…")
+                    .font(.caption.bold())
+            }
+
+            Spacer()
+
+            if offline.isFlushing {
+                ProgressView().scaleEffect(0.7)
+            } else if offline.pendingCount > 0 && network.isConnected {
+                Button("Sync Now") {
+                    Task { await OfflineStorageService.shared.flushQueue() }
+                }
+                .font(.caption.bold())
+                .buttonStyle(.plain)
+                .underline()
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(network.isConnected ? Color.statusWarning.opacity(0.85) : Color.statusError.opacity(0.85))
+        .foregroundStyle(.white)
+        .animation(.easeInOut(duration: 0.3), value: network.isConnected)
+        .animation(.easeInOut(duration: 0.3), value: offline.pendingCount)
     }
 
     // MARK: - Sidebar: Department List
@@ -49,13 +100,11 @@ struct EquipmentListView: View {
                 .tag(String?.none as String?)
                 .badge(vm.allEquipment.count)
 
-            // Per-department
+            // Per-department with progress bars
             Section("Departments") {
                 ForEach(vm.departments, id: \.self) { dept in
-                    let count = vm.allEquipment.filter { $0.department == dept }.count
-                    Label(dept, systemImage: "building.2")
+                    departmentRow(dept)
                         .tag(Optional(dept))
-                        .badge(count)
                 }
             }
         }
@@ -70,6 +119,15 @@ struct EquipmentListView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { Task { await vm.loadEquipment() } } label: {
                     Image(systemName: "arrow.clockwise")
+                }
+                .disabled(vm.loadState == .loading)
+            }
+            // Pending uploads indicator
+            if offline.pendingCount > 0 {
+                ToolbarItem(placement: .topBarLeading) {
+                    Label("\(offline.pendingCount) pending", systemImage: "icloud.and.arrow.up")
+                        .font(.caption)
+                        .foregroundStyle(Color.statusWarning)
                 }
             }
         }
@@ -86,13 +144,18 @@ struct EquipmentListView: View {
             case .error(let msg):
                 errorView(msg)
             default:
-                List(selection: $selectedEquipment) {
-                    ForEach(displayedGroups, id: \.department) { group in
-                        equipmentSection(group)
+                VStack(spacing: 0) {
+                    // Filter chips
+                    filterChips
+
+                    List(selection: $selectedEquipment) {
+                        ForEach(displayedGroups, id: \.department) { group in
+                            equipmentSection(group)
+                        }
                     }
+                    .listStyle(.insetGrouped)
+                    .animation(.default, value: vm.filteredGroups.map { $0.department })
                 }
-                .listStyle(.insetGrouped)
-                .animation(.default, value: vm.filteredGroups.map { $0.department })
             }
         }
         .navigationTitle(selectedDepartment ?? "All Equipment")
@@ -103,6 +166,70 @@ struct EquipmentListView: View {
         )
         .onChange(of: selectedEquipment) { _, equipment in
             if let equipment { vm.select(equipment) }
+        }
+        .onChange(of: displayedGroups.map { $0.department }) { _, _ in
+            vm.navigationList = displayedGroups.flatMap { $0.items }
+        }
+        .onAppear {
+            vm.navigationList = displayedGroups.flatMap { $0.items }
+        }
+    }
+
+    // MARK: - Filter Chips
+
+    private var filterChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(StatusFilter.allCases, id: \.self) { filter in
+                    let isSelected = statusFilter == filter
+                    let count = chipCount(for: filter)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            statusFilter = filter
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if filter != .all {
+                                Circle()
+                                    .fill(chipColor(for: filter))
+                                    .frame(width: 7, height: 7)
+                            }
+                            Text(filter.rawValue)
+                                .font(.caption.bold())
+                            Text("(\(count))")
+                                .font(.caption2)
+                                .foregroundStyle(isSelected ? .white.opacity(0.8) : .secondary)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(isSelected ? chipColor(for: filter) : Color(UIColor.systemGray5))
+                        .foregroundStyle(isSelected ? .white : .primary)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+        }
+        .background(Color(UIColor.systemGroupedBackground))
+    }
+
+    private func chipCount(for filter: StatusFilter) -> Int {
+        let base = vm.searchText.isEmpty ? vm.allEquipment : vm.filteredEquipment
+        let deptItems = selectedDepartment.map { d in base.filter { $0.department == d } } ?? base
+        switch filter {
+        case .all:      return deptItems.count
+        case .missing:  return deptItems.filter { $0.photoStatus == "missing"  }.count
+        case .partial:  return deptItems.filter { $0.photoStatus == "partial"  }.count
+        case .complete: return deptItems.filter { $0.photoStatus == "complete" }.count
+        }
+    }
+
+    private func chipColor(for filter: StatusFilter) -> Color {
+        switch filter {
+        case .all:      return Color.brandDeepIndigo
+        case .missing:  return Color.statusError
+        case .partial:  return Color.statusWarning
+        case .complete: return Color.statusSuccess
         }
     }
 
@@ -123,10 +250,22 @@ struct EquipmentListView: View {
     // MARK: - Computed Display Data
 
     private var displayedGroups: [(department: String, items: [Equipment])] {
-        let groups = vm.searchText.isEmpty ? vm.groupedEquipment : vm.filteredGroups
+        var groups = vm.searchText.isEmpty ? vm.groupedEquipment : vm.filteredGroups
+
+        // Apply department filter
         if let dept = selectedDepartment {
-            return groups.filter { $0.department == dept }
+            groups = groups.filter { $0.department == dept }
         }
+
+        // Apply status filter chips
+        if statusFilter != .all {
+            let status = statusFilter.rawValue.lowercased()
+            groups = groups.compactMap { group in
+                let filtered = group.items.filter { $0.photoStatus == status }
+                return filtered.isEmpty ? nil : (department: group.department, items: filtered)
+            }
+        }
+
         return groups
     }
 
@@ -184,6 +323,30 @@ struct EquipmentListView: View {
             Spacer()
             Text("\(count)").font(.caption2).foregroundStyle(.secondary)
         }
+    }
+
+    // MARK: - Department Row with Progress
+
+    private func departmentRow(_ dept: String) -> some View {
+        let items    = vm.allEquipment.filter { $0.department == dept }
+        let total    = items.count
+        let complete = items.filter { $0.photoStatus == "complete" }.count
+        let progress = total > 0 ? Double(complete) / Double(total) : 0
+
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label(dept, systemImage: "building.2")
+                    .font(.subheadline)
+                Spacer()
+                Text("\(complete)/\(total)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: progress)
+                .tint(progress == 1 ? Color.statusSuccess : Color.brandDeepIndigo)
+                .scaleEffect(x: 1, y: 0.7)
+        }
+        .padding(.vertical, 2)
     }
 
     // MARK: - Stats Row

@@ -138,24 +138,34 @@ struct BatchPrintView: View {
 
     @MainActor
     private func buildCombinedPDF(items: [Equipment]) -> Data {
-        let pageRect = CGRect(x: 0, y: 0, width: 792, height: 612)
+        let pageSize = CGSize(width: 792, height: 612)
+        let pageRect = CGRect(origin: .zero, size: pageSize)
         let renderer = UIGraphicsPDFRenderer(bounds: pageRect)
 
         return renderer.pdfData { ctx in
             for equipment in items {
                 ctx.beginPage()
+
+                // Generate each page as a UIImage (same approach as PDFGenerator.generate)
+                // to guarantee correct orientation — no raw CGContext drawing.
                 let pageData = PDFGenerator.shared.generate(
                     equipment: equipment,
                     equipmentPhoto: nil,
                     disconnectPhoto: nil
                 )
-                // Draw page from individual PDF
                 if let doc = PDFDocument(data: pageData),
                    let page = doc.page(at: 0) {
-                    let cgCtx = ctx.cgContext
-                    cgCtx.saveGState()
-                    page.draw(with: .mediaBox, to: cgCtx)
-                    cgCtx.restoreGState()
+                    let b = page.bounds(for: .mediaBox)
+                    let imgSize = CGSize(width: b.width, height: b.height)
+                    let imgRenderer = UIGraphicsImageRenderer(size: imgSize)
+                    let img = imgRenderer.image { imgCtx in
+                        UIColor.white.setFill()
+                        imgCtx.fill(CGRect(origin: .zero, size: imgSize))
+                        imgCtx.cgContext.translateBy(x: 0, y: imgSize.height)
+                        imgCtx.cgContext.scaleBy(x: 1, y: -1)
+                        page.draw(with: .mediaBox, to: imgCtx.cgContext)
+                    }
+                    img.draw(in: pageRect)
                 }
             }
         }

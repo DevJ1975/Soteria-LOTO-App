@@ -90,10 +90,20 @@ struct PlacardPreviewView: View {
 
         ToolbarItem(placement: .topBarTrailing) {
             Button {
-                Task { await vm.uploadPhotosAndSave() }
+                Task {
+                    await vm.uploadPhotosAndSave()
+                    if vm.uploadError == nil {
+                        UINotificationFeedbackGenerator().notificationOccurred(
+                            vm.savedOffline ? .warning : .success
+                        )
+                    }
+                }
             } label: {
                 if vm.isUploading {
                     ProgressView().scaleEffect(0.8)
+                } else if vm.savedOffline {
+                    Label("Saved Offline", systemImage: "icloud.slash")
+                        .foregroundStyle(Color.statusWarning)
                 } else {
                     Label("Save Photos", systemImage: "icloud.and.arrow.up")
                 }

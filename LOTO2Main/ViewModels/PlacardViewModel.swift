@@ -51,11 +51,14 @@ final class PlacardViewModel {
 
     // MARK: - Active Session
 
-    var selectedEquipment:  Equipment?
-    var equipmentPhoto:     UIImage?
-    var disconnectPhoto:    UIImage?
-    var energySteps:        [EnergyStep] = []
-    var isLoadingSteps:     Bool = false
+    var selectedEquipment:      Equipment?
+    var equipmentPhoto:         UIImage?
+    var disconnectPhoto:        UIImage?
+    var existingEquipPhoto:     UIImage?   // previously uploaded, loaded from Supabase URL
+    var existingIsoPhoto:       UIImage?   // previously uploaded, loaded from Supabase URL
+    var isLoadingExistingPhotos: Bool = false
+    var energySteps:            [EnergyStep] = []
+    var isLoadingSteps:         Bool = false
 
     // MARK: - PDF State
 
@@ -67,6 +70,7 @@ final class PlacardViewModel {
 
     var isUploading:        Bool    = false
     var uploadError:        String? = nil
+    var savedOffline:       Bool    = false   // true = queued for later sync
 
     // MARK: - Search (debounced)
 
@@ -89,7 +93,6 @@ final class PlacardViewModel {
     /// this runs silently in the background and updates the list when done.
     func loadEquipment() async {
         guard loadState != .loading else { return }
-        // If cache is showing, keep it visible (don't flash a spinner)
         let hadCache = loadState == .loaded
         if !hadCache { loadState = .loading }
         do {
@@ -97,24 +100,84 @@ final class PlacardViewModel {
             allEquipment  = equipment
             departments   = Array(Set(equipment.map { $0.department })).sorted()
             loadState     = .loaded
-            Self.saveCache(equipment)   // persist for next cold launch
+            Self.saveCache(equipment)
         } catch {
-            // If we have cached data, keep showing it rather than an error screen
             if !hadCache { loadState = .error(error.localizedDescription) }
         }
+    }
+
+    // MARK: - Network-aware refresh + sync
+
+    /// Call once on app launch. Re-fetches equipment and flushes the offline
+    /// upload queue whenever the device reconnects to the internet.
+    func startNetworkSync() {
+        Task { [weak self] in
+            var prev = NetworkMonitor.shared.isConnected
+            while !Task.isCancelled {
+                await withCheckedContinuation { continuation in
+                    withObservationTracking {
+                        _ = NetworkMonitor.shared.isConnected
+                    } onChange: {
+                        continuation.resume()
+                    }
+                }
+                let now = NetworkMonitor.shared.isConnected
+                if now && !prev {
+                    // Just reconnected — refresh data + flush pending uploads
+                    await self?.loadEquipment()
+                    await OfflineStorageService.shared.flushQueue()
+                }
+                prev = now
+            }
+        }
+    }
+
+    // MARK: - Navigation context (set by EquipmentListView so Next works)
+
+    var navigationList: [Equipment] = []
+
+    /// Returns the equipment item after the current selection in navigationList.
+    var nextEquipment: Equipment? {
+        guard let current = selectedEquipment,
+              let idx = navigationList.firstIndex(of: current),
+              idx + 1 < navigationList.count
+        else { return nil }
+        return navigationList[idx + 1]
     }
 
     // MARK: - Select
 
     func select(_ equipment: Equipment) {
-        selectedEquipment = equipment
-        equipmentPhoto    = nil
-        disconnectPhoto   = nil
-        generatedPDFData  = nil
-        pdfError          = nil
-        uploadError       = nil
-        energySteps       = []
+        selectedEquipment    = equipment
+        equipmentPhoto       = nil
+        disconnectPhoto      = nil
+        existingEquipPhoto   = nil
+        existingIsoPhoto     = nil
+        generatedPDFData     = nil
+        pdfError             = nil
+        uploadError          = nil
+        energySteps          = []
         Task { await loadEnergySteps(for: equipment.equipmentId) }
+        Task { await loadExistingPhotos(for: equipment) }
+    }
+
+    @MainActor
+    private func loadExistingPhotos(for equipment: Equipment) async {
+        guard equipment.equipPhotoUrl != nil || equipment.isoPhotoUrl != nil else { return }
+        isLoadingExistingPhotos = true
+        defer { isLoadingExistingPhotos = false }
+
+        async let equip = fetchRemoteImage(urlString: equipment.equipPhotoUrl)
+        async let iso   = fetchRemoteImage(urlString: equipment.isoPhotoUrl)
+        let (e, i) = await (equip, iso)
+        existingEquipPhoto = e
+        existingIsoPhoto   = i
+    }
+
+    private func fetchRemoteImage(urlString: String?) async -> UIImage? {
+        guard let str = urlString, let url = URL(string: str) else { return nil }
+        guard let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+        return UIImage(data: data)
     }
 
     @MainActor
@@ -154,8 +217,18 @@ final class PlacardViewModel {
     @MainActor
     func uploadPhotosAndSave() async {
         guard let equipment = selectedEquipment else { return }
+
+        // If offline, queue immediately without attempting upload
+        if !NetworkMonitor.shared.isConnected {
+            queueForLater(equipment: equipment)
+            uploadError = nil
+            savedOffline = true
+            return
+        }
+
         isUploading = true
         uploadError = nil
+        savedOffline = false
         defer { isUploading = false }
 
         do {
@@ -185,27 +258,36 @@ final class PlacardViewModel {
                 isoPhotoUrl:   isoURL,
                 placardUrl:    pdfURL
             )
-
-            // Update local cache so status dot refreshes immediately
-            if let idx = allEquipment.firstIndex(where: { $0.equipmentId == equipment.equipmentId }) {
-                // Equipment is a struct — we can't mutate it, but reload triggers cache rebuild
-                _ = idx
-            }
         } catch {
-            uploadError = error.localizedDescription
+            // Upload failed mid-flight — save to offline queue so nothing is lost
+            queueForLater(equipment: equipment)
+            uploadError = "Upload failed — saved offline. Will retry when connected."
         }
+    }
+
+    private func queueForLater(equipment: Equipment) {
+        let equipData = equipmentPhoto?.compressedJPEG()
+        let isoData   = disconnectPhoto?.compressedJPEG()
+        OfflineStorageService.shared.queue(
+            equipmentId: equipment.equipmentId,
+            equipPhoto:  equipData,
+            isoPhoto:    isoData,
+            pdf:         generatedPDFData
+        )
     }
 
     // MARK: - Reset
 
     func resetSession() {
-        selectedEquipment = nil
-        equipmentPhoto    = nil
-        disconnectPhoto   = nil
-        generatedPDFData  = nil
-        pdfError          = nil
-        uploadError       = nil
-        energySteps       = []
+        selectedEquipment    = nil
+        equipmentPhoto       = nil
+        disconnectPhoto      = nil
+        existingEquipPhoto   = nil
+        existingIsoPhoto     = nil
+        generatedPDFData     = nil
+        pdfError             = nil
+        uploadError          = nil
+        energySteps          = []
     }
 
     // MARK: - Private: Disk Cache
