@@ -181,7 +181,8 @@ The purpose of this procedure is to establish the mandatory requirements for the
         ]
 
         let headerText = "KEEP OUT! HAZARDOUS VOLTAGE AND MOVING PARTS."
-        let bodyText   = equipment.notes ?? "Refer to the physical LOTO placard on this equipment for full hazard details."
+        let notesValue = equipment.notes.flatMap { $0.isEmpty ? nil : $0 }
+        let bodyText   = notesValue ?? "Refer to the physical LOTO placard on this equipment for full hazard details."
 
         let hH = headerText.boundingRect(
             with: CGSize(width: w, height: .greatestFiniteMagnitude),
@@ -421,10 +422,14 @@ The purpose of this procedure is to establish the mandatory requirements for the
         }
     }
 
-    private func formattedDate() -> String {
+    private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .medium
-        return f.string(from: Date())
+        return f
+    }()
+
+    private func formattedDate() -> String {
+        Self.dateFormatter.string(from: Date())
     }
 }
 

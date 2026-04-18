@@ -66,6 +66,13 @@ final class PlacardViewModel {
     var isGeneratingPDF:    Bool    = false
     var pdfError:           String? = nil
 
+    // MARK: - Per-photo upload state (shown as indicators on each photo slot)
+
+    var isUploadingEquipPhoto: Bool    = false
+    var isUploadingIsoPhoto:   Bool    = false
+    var equipPhotoUploaded:    Bool    = false
+    var isoPhotoUploaded:      Bool    = false
+
     // MARK: - Upload State
 
     var isUploading:        Bool    = false
@@ -123,13 +130,22 @@ final class PlacardViewModel {
                 }
                 let now = NetworkMonitor.shared.isConnected
                 if now && !prev {
-                    // Just reconnected — refresh data + flush pending uploads
+                    // Just reconnected — refresh data only. Uploads are manual.
                     await self?.loadEquipment()
-                    await OfflineStorageService.shared.flushQueue()
                 }
                 prev = now
             }
         }
+    }
+
+    // MARK: - Recently Visited (last 10, session-only)
+
+    private(set) var recentlyVisited: [Equipment] = []
+
+    private func markVisited(_ equipment: Equipment) {
+        recentlyVisited.removeAll { $0.equipmentId == equipment.equipmentId }
+        recentlyVisited.insert(equipment, at: 0)
+        if recentlyVisited.count > 10 { recentlyVisited = Array(recentlyVisited.prefix(10)) }
     }
 
     // MARK: - Navigation context (set by EquipmentListView so Next works)
@@ -145,33 +161,202 @@ final class PlacardViewModel {
         return navigationList[idx + 1]
     }
 
-    // MARK: - Select
+    // MARK: - Background WiFi Photo Sync (#4)
 
-    func select(_ equipment: Equipment) {
-        selectedEquipment    = equipment
-        equipmentPhoto       = nil
-        disconnectPhoto      = nil
-        existingEquipPhoto   = nil
-        existingIsoPhoto     = nil
-        generatedPDFData     = nil
-        pdfError             = nil
-        uploadError          = nil
-        energySteps          = []
-        Task { await loadEnergySteps(for: equipment.equipmentId) }
-        Task { await loadExistingPhotos(for: equipment) }
+    /// Scans local photo storage for any photos that were saved offline but not yet uploaded.
+    /// Uploads them silently in the background. Only runs when connected.
+    @MainActor
+    func scanAndUploadMissingPhotos() async {
+        guard NetworkMonitor.shared.isConnected else { return }
+        let candidates = allEquipment.filter { !$0.hasEquipPhoto || !$0.hasIsoPhoto }
+        for item in candidates {
+            guard NetworkMonitor.shared.isConnected else { break }
+            if !item.hasEquipPhoto,
+               let img = PhotoStorageService.shared.loadLocal(equipment: item, type: .equipment) {
+                await uploadPhoto(image: img, equipment: item, type: .equipment)
+            }
+            if !item.hasIsoPhoto,
+               let img = PhotoStorageService.shared.loadLocal(equipment: item, type: .isolation) {
+                await uploadPhoto(image: img, equipment: item, type: .isolation)
+            }
+        }
+    }
+
+    // MARK: - Photo Capture (called immediately when camera/picker returns an image)
+
+    /// Called the moment a photo is taken or chosen. Saves locally with EXIF tags,
+    /// then uploads to Supabase in the background. UI updates instantly.
+    func photoTaken(_ image: UIImage, type: LOTOPhotoType) {
+        guard let equipment = selectedEquipment else { return }
+
+        // 1. Update in-memory state immediately (UI sees photo right away)
+        switch type {
+        case .equipment: equipmentPhoto = image; equipPhotoUploaded = false
+        case .isolation: disconnectPhoto = image; isoPhotoUploaded  = false
+        }
+        savedOffline = false
+        uploadError  = nil
+
+        // 2. Save locally with EXIF + proper filename (async, off main thread)
+        PhotoStorageService.shared.saveLocally(image: image, equipment: equipment, type: type)
+
+        // 3. Update local status immediately — missing / partial / complete
+        if let idx = allEquipment.firstIndex(where: { $0.equipmentId == equipment.equipmentId }) {
+            var updated = allEquipment[idx]
+            switch type {
+            case .equipment: updated.hasEquipPhoto = true
+            case .isolation: updated.hasIsoPhoto   = true
+            }
+            updated.photoStatus = updated.hasEquipPhoto && updated.hasIsoPhoto ? "complete"
+                                 : (updated.hasEquipPhoto || updated.hasIsoPhoto) ? "partial"
+                                 : "missing"
+            allEquipment[idx] = updated   // triggers rebuildGroupedCache() via didSet
+        }
+        // Upload is manual — tap the Upload button in the toolbar when ready.
     }
 
     @MainActor
-    private func loadExistingPhotos(for equipment: Equipment) async {
-        guard equipment.equipPhotoUrl != nil || equipment.isoPhotoUrl != nil else { return }
+    private func uploadPhoto(image: UIImage, equipment: Equipment, type: LOTOPhotoType) async {
+        guard NetworkMonitor.shared.isConnected else {
+            // Offline — local copy already saved by PhotoStorageService.
+            // Queue for sync when connectivity returns.
+            let data = image.compressedJPEG()
+            OfflineStorageService.shared.queue(
+                equipmentId: equipment.equipmentId,
+                equipPhoto:  type == .equipment ? data : nil,
+                isoPhoto:    type == .isolation  ? data : nil,
+                pdf:         nil
+            )
+            return
+        }
+
+        switch type {
+        case .equipment: isUploadingEquipPhoto = true
+        case .isolation: isUploadingIsoPhoto   = true
+        }
+        defer {
+            switch type {
+            case .equipment: isUploadingEquipPhoto = false
+            case .isolation: isUploadingIsoPhoto   = false
+            }
+        }
+
+        guard let compressed = image.compressedJPEG() else { return }
+
+        do {
+            let uploadedURL = try await SupabaseService.shared.uploadPhoto(
+                imageData: compressed,
+                equipmentId: equipment.equipmentId,
+                suffix: type.rawValue
+            )
+
+            // Determine new photo_status from what exists + what we just uploaded
+            let currentItem = allEquipment.first { $0.equipmentId == equipment.equipmentId }
+            let willHaveEquip = type == .equipment || (currentItem?.hasEquipPhoto ?? false)
+            let willHaveIso   = type == .isolation  || (currentItem?.hasIsoPhoto  ?? false)
+            let newStatus     = (willHaveEquip && willHaveIso) ? "complete" : "partial"
+
+            // Patch Supabase row — URLs + status + boolean flags in one call
+            try await SupabaseService.shared.updatePhotoURLs(
+                equipmentId:   equipment.equipmentId,
+                equipPhotoUrl: type == .equipment ? uploadedURL : nil,
+                isoPhotoUrl:   type == .isolation  ? uploadedURL : nil,
+                photoStatus:   newStatus,
+                hasEquipPhoto: type == .equipment ? true : nil,
+                hasIsoPhoto:   type == .isolation  ? true : nil
+            )
+
+            // Update local cache immediately — no full re-fetch needed
+            if let idx = allEquipment.firstIndex(where: { $0.equipmentId == equipment.equipmentId }) {
+                var updated = allEquipment[idx]
+                switch type {
+                case .equipment:
+                    updated.equipPhotoUrl = uploadedURL
+                    updated.hasEquipPhoto = true
+                case .isolation:
+                    updated.isoPhotoUrl = uploadedURL
+                    updated.hasIsoPhoto = true
+                }
+                updated.photoStatus = newStatus
+                allEquipment[idx] = updated   // triggers rebuildGroupedCache() via didSet
+            }
+
+            // Mark upload complete for UI badge
+            switch type {
+            case .equipment: equipPhotoUploaded = true
+            case .isolation: isoPhotoUploaded   = true
+            }
+
+            // Haptic feedback on success
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+
+        } catch {
+            uploadError = "Photo upload failed — queued for retry when reconnected."
+            // Queue so the offline service retries on reconnect
+            let data = image.compressedJPEG()
+            OfflineStorageService.shared.queue(
+                equipmentId: equipment.equipmentId,
+                equipPhoto:  type == .equipment ? data : nil,
+                isoPhoto:    type == .isolation  ? data : nil,
+                pdf:         nil
+            )
+        }
+    }
+
+    // MARK: - Select
+
+    func select(_ equipment: Equipment) {
+        markVisited(equipment)
+        selectedEquipment      = equipment
+        generatedPDFData       = nil
+        pdfError               = nil
+        uploadError            = nil
+        energySteps            = []
+        equipPhotoUploaded     = false
+        isoPhotoUploaded       = false
+        isUploadingEquipPhoto  = false
+        isUploadingIsoPhoto    = false
+
+        // Load local photos first (instant, no network) —
+        // then fall back to Supabase URL if not saved locally yet.
+        equipmentPhoto  = PhotoStorageService.shared.loadLocal(equipment: equipment, type: .equipment)
+        disconnectPhoto = PhotoStorageService.shared.loadLocal(equipment: equipment, type: .isolation)
+
+        existingEquipPhoto = nil
+        existingIsoPhoto   = nil
+
+        Task { await loadEnergySteps(for: equipment.equipmentId) }
+
+        // Only fetch remote previews for photos we don't have locally
+        let needsEquip = equipmentPhoto  == nil
+        let needsIso   = disconnectPhoto == nil
+        if needsEquip || needsIso {
+            Task { await loadExistingPhotos(for: equipment, equip: needsEquip, iso: needsIso) }
+        }
+    }
+
+    @MainActor
+    private func loadExistingPhotos(for equipment: Equipment, equip: Bool, iso: Bool) async {
+        guard (equip && equipment.equipPhotoUrl != nil) ||
+              (iso   && equipment.isoPhotoUrl   != nil) else { return }
         isLoadingExistingPhotos = true
         defer { isLoadingExistingPhotos = false }
 
-        async let equip = fetchRemoteImage(urlString: equipment.equipPhotoUrl)
-        async let iso   = fetchRemoteImage(urlString: equipment.isoPhotoUrl)
-        let (e, i) = await (equip, iso)
-        existingEquipPhoto = e
-        existingIsoPhoto   = i
+        if equip, let url = equipment.equipPhotoUrl {
+            if let img = await fetchRemoteImage(urlString: url) {
+                // Cache locally so future visits are instant
+                PhotoStorageService.shared.saveLocally(image: img, equipment: equipment, type: .equipment)
+                existingEquipPhoto = img
+                equipmentPhoto     = img
+            }
+        }
+        if iso, let url = equipment.isoPhotoUrl {
+            if let img = await fetchRemoteImage(urlString: url) {
+                PhotoStorageService.shared.saveLocally(image: img, equipment: equipment, type: .isolation)
+                existingIsoPhoto = img
+                disconnectPhoto  = img
+            }
+        }
     }
 
     private func fetchRemoteImage(urlString: String?) async -> UIImage? {
@@ -218,16 +403,16 @@ final class PlacardViewModel {
     func uploadPhotosAndSave() async {
         guard let equipment = selectedEquipment else { return }
 
-        // If offline, queue immediately without attempting upload
+        // If offline, queue this placard and stop — user will upload later
         if !NetworkMonitor.shared.isConnected {
             queueForLater(equipment: equipment)
-            uploadError = nil
+            uploadError  = nil
             savedOffline = true
             return
         }
 
-        isUploading = true
-        uploadError = nil
+        isUploading  = true
+        uploadError  = nil
         savedOffline = false
         defer { isUploading = false }
 
@@ -236,12 +421,16 @@ final class PlacardViewModel {
             var isoURL:   String?
             var pdfURL:   String?
 
-            if let img = equipmentPhoto, let data = img.compressedJPEG() {
+            // Use the in-session photo if available, otherwise fall back to locally cached
+            let equipImg = equipmentPhoto ?? existingEquipPhoto
+            let isoImg   = disconnectPhoto ?? existingIsoPhoto
+
+            if let img = equipImg, let data = img.compressedJPEG() {
                 equipURL = try await SupabaseService.shared.uploadPhoto(
                     imageData: data, equipmentId: equipment.equipmentId, suffix: "EQUIP"
                 )
             }
-            if let img = disconnectPhoto, let data = img.compressedJPEG() {
+            if let img = isoImg, let data = img.compressedJPEG() {
                 isoURL = try await SupabaseService.shared.uploadPhoto(
                     imageData: data, equipmentId: equipment.equipmentId, suffix: "ISO"
                 )
@@ -252,16 +441,32 @@ final class PlacardViewModel {
                 )
             }
 
+            let willHaveEquip = equipURL != nil || equipment.hasEquipPhoto
+            let willHaveIso   = isoURL   != nil || equipment.hasIsoPhoto
+            let newStatus     = willHaveEquip && willHaveIso ? "complete"
+                              : (willHaveEquip || willHaveIso) ? "partial" : "missing"
+
             try await SupabaseService.shared.updatePhotoURLs(
                 equipmentId:   equipment.equipmentId,
                 equipPhotoUrl: equipURL,
                 isoPhotoUrl:   isoURL,
-                placardUrl:    pdfURL
+                placardUrl:    pdfURL,
+                photoStatus:   newStatus,
+                hasEquipPhoto: equipURL != nil ? true : nil,
+                hasIsoPhoto:   isoURL   != nil ? true : nil
             )
+
+            equipPhotoUploaded = equipURL != nil
+            isoPhotoUploaded   = isoURL   != nil
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+
+            // Also flush any placards that were queued while offline
+            await OfflineStorageService.shared.flushQueue()
+
         } catch {
-            // Upload failed mid-flight — save to offline queue so nothing is lost
+            // Upload failed mid-flight — queue so nothing is lost
             queueForLater(equipment: equipment)
-            uploadError = "Upload failed — saved offline. Will retry when connected."
+            uploadError = "Upload failed — queued for next manual sync."
         }
     }
 

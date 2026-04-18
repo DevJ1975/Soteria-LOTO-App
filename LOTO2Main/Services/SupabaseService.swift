@@ -69,35 +69,14 @@ final class SupabaseService {
         }
     }
 
-    // MARK: - Fetch Distinct Departments
-
-    func fetchDepartments() async throws -> [String] {
-        guard ConfigService.shared.isFullyConfigured else { throw SupabaseError.notConfigured }
-
-        let urlString = "\(base)/rest/v1/loto_equipment?select=department&order=department.asc"
-        guard let url = URL(string: urlString) else { throw SupabaseError.invalidURL }
-
-        var request = URLRequest(url: url)
-        addHeaders(&request)
-
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data)
-
-        guard let rows = try? JSONDecoder().decode([[String: String]].self, from: data) else {
-            throw SupabaseError.decodingError("Could not parse department list")
-        }
-
-        var seen = Set<String>()
-        return rows.compactMap { $0["department"] }.filter { seen.insert($0).inserted }
-    }
-
     // MARK: - Fetch Energy Steps
 
     /// Fetches all energy isolation steps for a given equipment ID.
     func fetchEnergySteps(equipmentId: String) async throws -> [EnergyStep] {
         guard ConfigService.shared.isFullyConfigured else { throw SupabaseError.notConfigured }
+        guard !equipmentId.isEmpty else { throw SupabaseError.invalidURL }
 
-        let encoded   = equipmentId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? equipmentId
+        let encoded   = equipmentId.addingPercentEncoding(withAllowedCharacters: .urlQueryValue) ?? equipmentId
         let urlString = "\(base)/rest/v1/loto_energy_steps?equipment_id=eq.\(encoded)&order=energy_type.asc,step_number.asc"
         guard let url = URL(string: urlString) else { throw SupabaseError.invalidURL }
 
@@ -144,30 +123,38 @@ final class SupabaseService {
 
     // MARK: - Update Photo URLs on Row
 
-    /// Patches the equipment row with new photo URLs and placard URL.
+    /// Patches the equipment row with photo URLs, boolean flags, and photo_status.
     func updatePhotoURLs(
-        equipmentId: String,
+        equipmentId:   String,
         equipPhotoUrl: String? = nil,
-        isoPhotoUrl: String?   = nil,
-        placardUrl: String?    = nil
+        isoPhotoUrl:   String? = nil,
+        placardUrl:    String? = nil,
+        photoStatus:   String? = nil,
+        hasEquipPhoto: Bool?   = nil,
+        hasIsoPhoto:   Bool?   = nil
     ) async throws {
         guard ConfigService.shared.isFullyConfigured else { throw SupabaseError.notConfigured }
+        guard !equipmentId.isEmpty else { throw SupabaseError.invalidURL }
 
-        let encoded   = equipmentId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? equipmentId
+        let encoded   = equipmentId.addingPercentEncoding(withAllowedCharacters: .urlQueryValue) ?? equipmentId
         let urlString = "\(base)/rest/v1/loto_equipment?equipment_id=eq.\(encoded)"
         guard let url = URL(string: urlString) else { throw SupabaseError.invalidURL }
 
-        var body: [String: String] = [:]
-        if let eq = equipPhotoUrl  { body["equip_photo_url"] = eq }
-        if let iso = isoPhotoUrl   { body["iso_photo_url"]   = iso }
-        if let pl = placardUrl     { body["placard_url"]      = pl }
+        // Use [String: Any] so we can mix String and Bool values
+        var body: [String: Any] = [:]
+        if let eq  = equipPhotoUrl  { body["equip_photo_url"]  = eq  }
+        if let iso = isoPhotoUrl    { body["iso_photo_url"]    = iso }
+        if let pl  = placardUrl     { body["placard_url"]       = pl  }
+        if let st  = photoStatus    { body["photo_status"]     = st  }
+        if let he  = hasEquipPhoto  { body["has_equip_photo"]  = he  }
+        if let hi  = hasIsoPhoto    { body["has_iso_photo"]    = hi  }
         guard !body.isEmpty else { return }
 
-        var request            = URLRequest(url: url)
-        request.httpMethod     = "PATCH"
-        request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+        var request        = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("return=minimal",   forHTTPHeaderField: "Prefer")
         addHeaders(&request)
-        request.httpBody = try JSONEncoder().encode(body)
+        request.httpBody   = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await session.data(for: request)
         try validate(response, data)
@@ -220,5 +207,17 @@ final class SupabaseService {
             let c = Character(scalar)
             return (c.isLetter || c.isNumber || c == "-" || c == "_") ? String(c) : "_"
         }.joined()
+    }
+}
+
+// MARK: - CharacterSet extension
+
+private extension CharacterSet {
+    /// Like .urlQueryAllowed but also encodes `&`, `+`, `=`, and `#` so that
+    /// equipment IDs containing those characters don't break PostgREST filter params.
+    static var urlQueryValue: CharacterSet {
+        var cs = CharacterSet.urlQueryAllowed
+        cs.remove(charactersIn: "&+=#+")
+        return cs
     }
 }

@@ -40,6 +40,11 @@ struct PlacardFormView: View {
             ScrollView {
                 VStack(spacing: 0) {
                     headerBand
+                    // Compact photo thumbnails for quick reference (#11)
+                    if vm.equipmentPhoto != nil || vm.disconnectPhoto != nil
+                        || vm.existingEquipPhoto != nil || vm.existingIsoPhoto != nil {
+                        photoThumbnailStrip
+                    }
                     equipmentBar
                     warningBlock
                     purposeAndSteps
@@ -57,19 +62,19 @@ struct PlacardFormView: View {
             }
             .sheet(isPresented: $showEquipCamera) {
                 CameraPickerView { image in
-                    vm.equipmentPhoto = image
+                    vm.photoTaken(image, type: .equipment)
                 }
             }
             .sheet(isPresented: $showIsoCamera) {
                 CameraPickerView { image in
-                    vm.disconnectPhoto = image
+                    vm.photoTaken(image, type: .isolation)
                 }
             }
             .onChange(of: equipPickerItem) { _, item in
-                Task { await loadPhoto(item: item, isEquipment: true) }
+                Task { await loadPhoto(item: item, type: .equipment) }
             }
             .onChange(of: isoPickerItem) { _, item in
-                Task { await loadPhoto(item: item, isEquipment: false) }
+                Task { await loadPhoto(item: item, type: .isolation) }
             }
             .confirmationDialog(
                 "A photo already exists for this equipment. Replace it?",
@@ -122,6 +127,36 @@ struct PlacardFormView: View {
         .overlay(Rectangle().strokeBorder(.black, lineWidth: 1))
     }
 
+    // MARK: - Photo Thumbnail Strip (#11)
+
+    private var photoThumbnailStrip: some View {
+        HStack(spacing: 8) {
+            if let img = vm.equipmentPhoto ?? vm.existingEquipPhoto {
+                VStack(spacing: 2) {
+                    Image(uiImage: img)
+                        .resizable().scaledToFill()
+                        .frame(width: 48, height: 36).clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    Text("EQUIP").font(.system(size: 6, weight: .bold)).foregroundStyle(.white.opacity(0.7))
+                }
+            }
+            if let img = vm.disconnectPhoto ?? vm.existingIsoPhoto {
+                VStack(spacing: 2) {
+                    Image(uiImage: img)
+                        .resizable().scaledToFill()
+                        .frame(width: 48, height: 36).clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    Text("ISO").font(.system(size: 6, weight: .bold)).foregroundStyle(.white.opacity(0.7))
+                }
+            }
+            Spacer()
+            Image(systemName: "photo.stack.fill")
+                .font(.caption2).foregroundStyle(.white.opacity(0.4))
+        }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(Color(red: 0.13, green: 0.22, blue: 0.48))
+    }
+
     // MARK: - Equipment Bar
 
     private var equipmentBar: some View {
@@ -147,7 +182,7 @@ struct PlacardFormView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("KEEP OUT! HAZARDOUS VOLTAGE AND MOVING PARTS.")
                 .font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
-            Text(equipment.notes ?? "Refer to the physical LOTO placard on this equipment for full hazard and energy isolation details.")
+            Text(equipment.notes.flatMap { $0.isEmpty ? nil : $0 } ?? "Refer to the physical LOTO placard on this equipment for full hazard and energy isolation details.")
                 .font(.system(size: 8)).foregroundStyle(.white)
         }
         .padding(8)
@@ -291,17 +326,34 @@ struct PlacardFormView: View {
                         }
                     }
 
-                    // Badge: new photo taken vs existing uploaded
-                    if newImage != nil {
-                        Text("NEW").font(.system(size: 7, weight: .black))
-                            .padding(.horizontal, 5).padding(.vertical, 2)
-                            .background(Color.statusSuccess)
-                            .foregroundStyle(.white).clipShape(Capsule())
-                            .padding(4)
-                    } else if existingImage != nil {
-                        Image(systemName: "checkmark.icloud.fill")
-                            .font(.caption).foregroundStyle(Color.statusSuccess)
-                            .padding(6)
+                    // Upload status badge (top-right corner of photo)
+                    let isUploading = target == .equipment ? vm.isUploadingEquipPhoto : vm.isUploadingIsoPhoto
+                    let uploaded    = target == .equipment ? vm.equipPhotoUploaded    : vm.isoPhotoUploaded
+
+                    Group {
+                        if isUploading {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                                .padding(6)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .padding(4)
+                        } else if uploaded {
+                            Image(systemName: "checkmark.icloud.fill")
+                                .font(.caption).foregroundStyle(Color.statusSuccess)
+                                .padding(6)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .padding(4)
+                        } else if newImage != nil {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.caption).foregroundStyle(Color.statusWarning)
+                                .padding(6)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .padding(4)
+                        } else if existingImage != nil {
+                            Image(systemName: "checkmark.icloud.fill")
+                                .font(.caption).foregroundStyle(Color.statusSuccess)
+                                .padding(6)
+                        }
                     }
                 }
 
@@ -445,6 +497,28 @@ struct PlacardFormView: View {
             }
         }
 
+        // Upload button — manual sync
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                Task { await vm.uploadPhotosAndSave() }
+            } label: {
+                if vm.isUploading {
+                    ProgressView().scaleEffect(0.8)
+                } else if vm.savedOffline {
+                    Label("Queued", systemImage: "icloud.slash")
+                        .foregroundStyle(.orange)
+                } else {
+                    Label("Upload", systemImage: "icloud.and.arrow.up")
+                }
+            }
+            .disabled(
+                vm.isUploading ||
+                vm.equipmentPhoto == nil && vm.disconnectPhoto == nil &&
+                vm.existingEquipPhoto == nil && vm.existingIsoPhoto == nil
+            )
+        }
+
+        // Generate PDF button
         ToolbarItem(placement: .topBarTrailing) {
             Button {
                 Task {
@@ -455,26 +529,30 @@ struct PlacardFormView: View {
                 if vm.isGeneratingPDF {
                     ProgressView().scaleEffect(0.8)
                 } else {
-                    Label("Generate PDF", systemImage: "doc.badge.plus")
+                    Label("PDF", systemImage: "doc.badge.plus")
                 }
             }
-            .disabled(vm.isGeneratingPDF || (vm.equipmentPhoto == nil && vm.disconnectPhoto == nil))
+            .disabled(vm.isGeneratingPDF || (vm.equipmentPhoto == nil && vm.disconnectPhoto == nil
+                && vm.existingEquipPhoto == nil && vm.existingIsoPhoto == nil))
         }
     }
 
     // MARK: - Photo Loading
 
-    private func loadPhoto(item: PhotosPickerItem?, isEquipment: Bool) async {
+    private func loadPhoto(item: PhotosPickerItem?, type: LOTOPhotoType) async {
         guard let item else { return }
-        if let data = try? await item.loadTransferable(type: Data.self),
+        if let data  = try? await item.loadTransferable(type: Data.self),
            let image = UIImage(data: data) {
-            if isEquipment { vm.equipmentPhoto    = image }
-            else           { vm.disconnectPhoto   = image }
+            vm.photoTaken(image, type: type)
         }
     }
 
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .medium; return f
+    }()
+
     private func formattedDate() -> String {
-        let f = DateFormatter(); f.dateStyle = .medium; return f.string(from: Date())
+        Self.dateFormatter.string(from: Date())
     }
 
     // MARK: - Static Text

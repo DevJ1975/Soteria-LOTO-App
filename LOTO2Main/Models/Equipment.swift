@@ -17,10 +17,10 @@ struct Equipment: Codable, Identifiable, Hashable {
     let department: String         // e.g. "Mixers"
     let prefix: String             // e.g. "321"
 
-    // Photo tracking
-    let hasEquipPhoto: Bool
-    let hasIsoPhoto: Bool
-    let photoStatus: String        // "missing" | "partial" | "complete"
+    // Photo tracking (var so local cache can be updated without a full re-fetch)
+    var hasEquipPhoto: Bool
+    var hasIsoPhoto: Bool
+    var photoStatus: String        // "missing" | "partial" | "complete"
     let needsEquipPhoto: Bool
     let needsIsoPhoto: Bool
     let needsVerification: Bool

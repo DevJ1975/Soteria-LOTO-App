@@ -17,12 +17,22 @@ struct EquipmentListView: View {
     @State private var showBatchPrint      = false
     @State private var columnVisibility    = NavigationSplitViewVisibility.all
     @State private var statusFilter:       StatusFilter = .all
+    @State private var sortOrder:          SortOrder    = .equipmentId
+    @State private var flaggedIDs:         Set<String>  = []   // session-only follow-up flags
+
+    // MARK: - Enums
 
     enum StatusFilter: String, CaseIterable {
-        case all      = "All"
-        case missing  = "Missing"
-        case partial  = "Partial"
-        case complete = "Complete"
+        case all        = "All"
+        case needsPhoto = "Needs Photo"
+        case missing    = "Missing"
+        case partial    = "Partial"
+        case complete   = "Complete"
+    }
+
+    enum SortOrder: String, CaseIterable {
+        case equipmentId = "Equipment ID"
+        case status      = "Status"
     }
 
     private var network: NetworkMonitor { NetworkMonitor.shared }
@@ -30,7 +40,7 @@ struct EquipmentListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Offline/pending banner — shown when no connection or uploads queued
+            // Offline/pending banner
             if !network.isConnected || offline.pendingCount > 0 {
                 offlineBanner
             }
@@ -90,8 +100,9 @@ struct EquipmentListView: View {
 
     private var sidebarColumn: some View {
         List(selection: $selectedDepartment) {
-            // Stats header
+            // Completion summary card (#7)
             Section {
+                completionCard
                 statsRow
             }
 
@@ -105,6 +116,38 @@ struct EquipmentListView: View {
                 ForEach(vm.departments, id: \.self) { dept in
                     departmentRow(dept)
                         .tag(Optional(dept))
+                }
+            }
+
+            // Recently visited (#6)
+            if !vm.recentlyVisited.isEmpty {
+                Section("Recently Visited") {
+                    ForEach(vm.recentlyVisited) { item in
+                        Button {
+                            selectedDepartment = item.department
+                            selectedEquipment  = item   // .onChange handles vm.select()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "clock")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(item.equipmentId)
+                                        .font(.caption.bold())
+                                        .foregroundStyle(Color.brandDeepIndigo)
+                                    Text(item.shortName)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Circle()
+                                    .fill(statusColor(item.photoStatus))
+                                    .frame(width: 7, height: 7)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
         }
@@ -122,7 +165,6 @@ struct EquipmentListView: View {
                 }
                 .disabled(vm.loadState == .loading)
             }
-            // Pending uploads indicator
             if offline.pendingCount > 0 {
                 ToolbarItem(placement: .topBarLeading) {
                     Label("\(offline.pendingCount) pending", systemImage: "icloud.and.arrow.up")
@@ -145,7 +187,6 @@ struct EquipmentListView: View {
                 errorView(msg)
             default:
                 VStack(spacing: 0) {
-                    // Filter chips
                     filterChips
 
                     List(selection: $selectedEquipment) {
@@ -164,6 +205,20 @@ struct EquipmentListView: View {
             text: Binding(get: { vm.searchText }, set: { vm.searchText = $0 }),
             prompt: "Search equipment"
         )
+        .toolbar {
+            // Sort toggle (#8)
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Picker("Sort by", selection: $sortOrder) {
+                        ForEach(SortOrder.allCases, id: \.self) { order in
+                            Text(order.rawValue).tag(order)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                }
+            }
+        }
         .onChange(of: selectedEquipment) { _, equipment in
             if let equipment { vm.select(equipment) }
         }
@@ -217,20 +272,28 @@ struct EquipmentListView: View {
         let base = vm.searchText.isEmpty ? vm.allEquipment : vm.filteredEquipment
         let deptItems = selectedDepartment.map { d in base.filter { $0.department == d } } ?? base
         switch filter {
-        case .all:      return deptItems.count
-        case .missing:  return deptItems.filter { $0.photoStatus == "missing"  }.count
-        case .partial:  return deptItems.filter { $0.photoStatus == "partial"  }.count
-        case .complete: return deptItems.filter { $0.photoStatus == "complete" }.count
+        case .all:        return deptItems.count
+        case .needsPhoto: return deptItems.filter { needsPhotoFilter($0) }.count
+        case .missing:    return deptItems.filter { $0.photoStatus == "missing"  }.count
+        case .partial:    return deptItems.filter { $0.photoStatus == "partial"  }.count
+        case .complete:   return deptItems.filter { $0.photoStatus == "complete" }.count
         }
     }
 
     private func chipColor(for filter: StatusFilter) -> Color {
         switch filter {
-        case .all:      return Color.brandDeepIndigo
-        case .missing:  return Color.statusError
-        case .partial:  return Color.statusWarning
-        case .complete: return Color.statusSuccess
+        case .all:        return Color.brandDeepIndigo
+        case .needsPhoto: return Color.statusWarning
+        case .missing:    return Color.statusError
+        case .partial:    return Color.statusWarning
+        case .complete:   return Color.statusSuccess
         }
+    }
+
+    /// True if this equipment still needs at least one photo captured.
+    private func needsPhotoFilter(_ equipment: Equipment) -> Bool {
+        (equipment.needsEquipPhoto && !equipment.hasEquipPhoto) ||
+        (equipment.needsIsoPhoto   && !equipment.hasIsoPhoto)
     }
 
     // MARK: - Detail: Placard Form
@@ -240,7 +303,7 @@ struct EquipmentListView: View {
             if let equipment = selectedEquipment {
                 PlacardFormView(equipment: equipment)
                     .environment(vm)
-                    .id(equipment.id) // force reinit when selection changes
+                    .id(equipment.id)
             } else {
                 emptyDetail
             }
@@ -252,17 +315,37 @@ struct EquipmentListView: View {
     private var displayedGroups: [(department: String, items: [Equipment])] {
         var groups = vm.searchText.isEmpty ? vm.groupedEquipment : vm.filteredGroups
 
-        // Apply department filter
+        // Department filter
         if let dept = selectedDepartment {
             groups = groups.filter { $0.department == dept }
         }
 
-        // Apply status filter chips
-        if statusFilter != .all {
+        // Status filter chips (#1 adds .needsPhoto)
+        switch statusFilter {
+        case .all: break
+        case .needsPhoto:
+            groups = groups.compactMap { group in
+                let filtered = group.items.filter { needsPhotoFilter($0) }
+                return filtered.isEmpty ? nil : (department: group.department, items: filtered)
+            }
+        default:
             let status = statusFilter.rawValue.lowercased()
             groups = groups.compactMap { group in
                 let filtered = group.items.filter { $0.photoStatus == status }
                 return filtered.isEmpty ? nil : (department: group.department, items: filtered)
+            }
+        }
+
+        // Sort order (#8)
+        switch sortOrder {
+        case .equipmentId: break   // already sorted by equipmentId in cache
+        case .status:
+            let priority = ["missing": 0, "partial": 1, "complete": 2]
+            groups = groups.map { group in
+                let sorted = group.items.sorted {
+                    (priority[$0.photoStatus] ?? 0) < (priority[$1.photoStatus] ?? 0)
+                }
+                return (department: group.department, items: sorted)
             }
         }
 
@@ -275,7 +358,25 @@ struct EquipmentListView: View {
     private func equipmentSection(_ group: (department: String, items: [Equipment])) -> some View {
         Section(header: deptHeader(group.department, count: group.items.count)) {
             ForEach(group.items) { item in
-                equipmentRow(item).tag(item)
+                equipmentRow(item)
+                    .tag(item)
+                    // Swipe trailing: flag for follow-up (#9)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button {
+                            if flaggedIDs.contains(item.equipmentId) {
+                                flaggedIDs.remove(item.equipmentId)
+                            } else {
+                                flaggedIDs.insert(item.equipmentId)
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            }
+                        } label: {
+                            Label(
+                                flaggedIDs.contains(item.equipmentId) ? "Unflag" : "Flag",
+                                systemImage: flaggedIDs.contains(item.equipmentId) ? "flag.slash" : "flag"
+                            )
+                        }
+                        .tint(Color.statusWarning)
+                    }
             }
         }
     }
@@ -287,9 +388,17 @@ struct EquipmentListView: View {
                 .frame(width: 9, height: 9)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(equipment.equipmentId)
-                    .font(.system(.body, design: .monospaced).bold())
-                    .foregroundStyle(Color.brandDeepIndigo)
+                HStack(spacing: 4) {
+                    Text(equipment.equipmentId)
+                        .font(.system(.body, design: .monospaced).bold())
+                        .foregroundStyle(Color.brandDeepIndigo)
+                    // Flag indicator (#9)
+                    if flaggedIDs.contains(equipment.equipmentId) {
+                        Image(systemName: "flag.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Color.statusWarning)
+                    }
+                }
                 Text(equipment.shortName)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -298,7 +407,25 @@ struct EquipmentListView: View {
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .trailing, spacing: 3) {
+                // Photo count badge: "0/2", "1/2", "2/2" (#2)
+                let needed   = (equipment.needsEquipPhoto ? 1 : 0) + (equipment.needsIsoPhoto ? 1 : 0)
+                let captured = (equipment.hasEquipPhoto   ? 1 : 0) + (equipment.hasIsoPhoto   ? 1 : 0)
+                if needed > 0 {
+                    Text("\(captured)/\(needed)")
+                        .font(.caption2.bold())
+                        .foregroundStyle(captured == needed ? Color.statusSuccess : .secondary)
+                }
+
+                // Offline sync pending badge (#5)
+                let localEquip = PhotoStorageService.shared.hasLocal(equipment: equipment, type: .equipment)
+                let localIso   = PhotoStorageService.shared.hasLocal(equipment: equipment, type: .isolation)
+                if (localEquip && !equipment.hasEquipPhoto) || (localIso && !equipment.hasIsoPhoto) {
+                    Image(systemName: "icloud.slash")
+                        .font(.caption2)
+                        .foregroundStyle(Color.statusWarning)
+                }
+
                 Text(equipment.photoStatus.capitalized)
                     .font(.caption2.bold())
                     .padding(.horizontal, 6).padding(.vertical, 2)
@@ -349,17 +476,46 @@ struct EquipmentListView: View {
         .padding(.vertical, 2)
     }
 
+    // MARK: - Completion Summary Card (#7)
+
+    private var completionCard: some View {
+        let total     = vm.allEquipment.count
+        let done      = vm.countComplete
+        let remaining = total - done
+        let pct       = total > 0 ? Int(Double(done) / Double(total) * 100) : 0
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Overall Progress")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(pct)%")
+                    .font(.caption.bold())
+                    .foregroundStyle(pct == 100 ? Color.statusSuccess : Color.brandDeepIndigo)
+            }
+            ProgressView(value: Double(done), total: Double(max(total, 1)))
+                .tint(pct == 100 ? Color.statusSuccess : Color.brandDeepIndigo)
+            Text(remaining > 0
+                 ? "\(done) of \(total) complete — \(remaining) remaining"
+                 : "All \(total) placards complete")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
     // MARK: - Stats Row
 
     private var statsRow: some View {
         HStack(spacing: 0) {
-            statCell(value: vm.allEquipment.count, label: "Total", color: Color.brandDeepIndigo)
+            statCell(value: vm.allEquipment.count, label: "Total",   color: Color.brandDeepIndigo)
             Divider().frame(height: 28)
-            statCell(value: vm.countComplete, label: "Done",    color: Color.statusSuccess)
+            statCell(value: vm.countComplete,      label: "Done",    color: Color.statusSuccess)
             Divider().frame(height: 28)
-            statCell(value: vm.countPartial,  label: "Partial", color: Color.statusWarning)
+            statCell(value: vm.countPartial,       label: "Partial", color: Color.statusWarning)
             Divider().frame(height: 28)
-            statCell(value: vm.countMissing,  label: "Missing", color: Color.statusError)
+            statCell(value: vm.countMissing,       label: "Missing", color: Color.statusError)
         }
         .padding(.vertical, 4)
     }

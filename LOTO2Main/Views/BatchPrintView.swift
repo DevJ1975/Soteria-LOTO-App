@@ -43,10 +43,15 @@ struct BatchPrintView: View {
                 // Info
                 if !selectedDepartment.isEmpty {
                     Section("Batch Info") {
-                        let count = vm.allEquipment.filter { $0.department == selectedDepartment }.count
-                        LabeledContent("Equipment items", value: "\(count)")
-                        LabeledContent("Output", value: "\(count)-page PDF")
-                        LabeledContent("Note", value: "Photos must be taken individually per machine. Batch PDF uses placeholder photo slots.")
+                        let deptItems  = vm.allEquipment.filter { $0.department == selectedDepartment }
+                        let count      = deptItems.count
+                        let withPhotos = deptItems.filter {
+                            PhotoStorageService.shared.hasLocal(equipment: $0, type: .equipment) ||
+                            PhotoStorageService.shared.hasLocal(equipment: $0, type: .isolation)
+                        }.count
+                        LabeledContent("Equipment items",  value: "\(count)")
+                        LabeledContent("With local photos", value: "\(withPhotos) of \(count)")
+                        LabeledContent("Output", value: "\(count)-page PDF with available photos")
                     }
                 }
 
@@ -105,7 +110,7 @@ struct BatchPrintView: View {
         }
     }
 
-    // MARK: - Batch Generation
+    // MARK: - Batch Generation (#12 — includes locally-saved photos)
 
     private func generateBatch() async {
         guard !selectedDepartment.isEmpty else { return }
@@ -121,23 +126,38 @@ struct BatchPrintView: View {
             return
         }
 
-        // Generate one PDF page per equipment item (no photos — batch mode)
-        await MainActor.run {
-            let combined = buildCombinedPDF(items: items)
-            let name = "\(selectedDepartment)_LOTO_Batch.pdf"
-                .replacingOccurrences(of: " ", with: "_")
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-            if (try? combined.write(to: url)) != nil {
-                batchPDFURL = url
-                showShare   = true
-            } else {
-                errorMessage = "Could not write the PDF file."
+        // Pre-load local photos (fast index lookups, no network).
+        var photoCache: [String: (UIImage?, UIImage?)] = [:]
+        for item in items {
+            let equip = PhotoStorageService.shared.loadLocal(equipment: item, type: .equipment)
+            let iso   = PhotoStorageService.shared.loadLocal(equipment: item, type: .isolation)
+            if equip != nil || iso != nil {
+                photoCache[item.equipmentId] = (equip, iso)
             }
+        }
+
+        // Generate all page images on a background thread so the main thread
+        // stays free (large departments can take several seconds to render).
+        let combined = await Task.detached(priority: .userInitiated) {
+            await buildCombinedPDF(items: items, photoCache: photoCache)
+        }.value
+
+        let name = "\(selectedDepartment)_LOTO_Batch.pdf"
+            .replacingOccurrences(of: " ", with: "_")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        if (try? combined.write(to: url)) != nil {
+            batchPDFURL = url
+            showShare   = true
+        } else {
+            errorMessage = "Could not write the PDF file."
         }
     }
 
+    // PDFGenerator is @MainActor, so each page hops to main; the outer Task is
+    // detached to prevent the call-site from blocking the SwiftUI render loop.
     @MainActor
-    private func buildCombinedPDF(items: [Equipment]) -> Data {
+    private func buildCombinedPDF(items: [Equipment],
+                                   photoCache: [String: (UIImage?, UIImage?)]) -> Data {
         let pageSize = CGSize(width: 792, height: 612)
         let pageRect = CGRect(origin: .zero, size: pageSize)
         let renderer = UIGraphicsPDFRenderer(bounds: pageRect)
@@ -145,13 +165,11 @@ struct BatchPrintView: View {
         return renderer.pdfData { ctx in
             for equipment in items {
                 ctx.beginPage()
-
-                // Generate each page as a UIImage (same approach as PDFGenerator.generate)
-                // to guarantee correct orientation — no raw CGContext drawing.
+                let (equip, iso) = photoCache[equipment.equipmentId] ?? (nil, nil)
                 let pageData = PDFGenerator.shared.generate(
                     equipment: equipment,
-                    equipmentPhoto: nil,
-                    disconnectPhoto: nil
+                    equipmentPhoto: equip,
+                    disconnectPhoto: iso
                 )
                 if let doc = PDFDocument(data: pageData),
                    let page = doc.page(at: 0) {

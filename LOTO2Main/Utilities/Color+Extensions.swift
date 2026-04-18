@@ -17,9 +17,6 @@ extension Color {
     static let brandIndigo       = Color(hex: "#1a237e")
     /// Header gradient end / accent — #283593
     static let brandAccentIndigo = Color(hex: "#283593")
-    /// Microsoft sign-in button blue — #0078D4
-    static let microsoftBlue     = Color(hex: "#0078D4")
-
     // MARK: Status
 
     static let statusSuccess = Color(hex: "#2e7d32")

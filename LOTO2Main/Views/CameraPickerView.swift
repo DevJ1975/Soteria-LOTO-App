@@ -3,6 +3,7 @@
 //  LOTO2Main
 //
 //  Wraps UIImagePickerController in a SwiftUI sheet for live camera capture.
+//  Locks to landscape orientation (matching the placard layout).
 //  Falls back gracefully on simulator where camera is unavailable.
 //
 
@@ -19,14 +20,22 @@ struct CameraPickerView: UIViewControllerRepresentable {
     }
 
     func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
+        let picker = LandscapeImagePicker()
         picker.sourceType = UIImagePickerController.isSourceTypeAvailable(.camera) ? .camera : .photoLibrary
         picker.allowsEditing = false
+        picker.cameraFlashMode = .auto   // Flash available via built-in camera controls
         picker.delegate = context.coordinator
         return picker
     }
 
     func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    // MARK: - Landscape-locked picker subclass (#3)
+
+    private class LandscapeImagePicker: UIImagePickerController {
+        override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
+        override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .landscapeRight }
+    }
 
     // MARK: - Coordinator
 

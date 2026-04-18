@@ -51,7 +51,6 @@ final class OfflineStorageService {
         dir = docs.appendingPathComponent("PendingUploads", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         loadFromDisk()
-        startNetworkObservation()
     }
 
     // MARK: - Queue an Upload
@@ -125,12 +124,13 @@ final class OfflineStorageService {
     // MARK: - Private: Upload one item
 
     private func uploadPending(_ upload: PendingUpload) async throws {
-        let equipData = try? Data(contentsOf: photoURL(upload.id, suffix: "equip"))
-        let isoData   = try? Data(contentsOf: photoURL(upload.id, suffix: "iso"))
-        let pdfData   = try? Data(contentsOf: photoURL(upload.id, suffix: "pdf"))
+        // Only read files flagged in the metadata — avoids reading stale leftover files
+        let equipData = upload.hasEquipPhoto ? (try? Data(contentsOf: photoURL(upload.id, suffix: "equip"))) : nil
+        let isoData   = upload.hasIsoPhoto   ? (try? Data(contentsOf: photoURL(upload.id, suffix: "iso")))   : nil
+        let pdfData   = upload.hasPDF        ? (try? Data(contentsOf: photoURL(upload.id, suffix: "pdf")))   : nil
 
-        var equipURL: String?
-        var isoURL:   String?
+        var equipURL:   String?
+        var isoURL:     String?
         var placardURL: String?
 
         if let d = equipData {
@@ -149,11 +149,24 @@ final class OfflineStorageService {
             )
         }
 
+        let uploadedEquip = equipURL != nil
+        let uploadedIso   = isoURL   != nil
+
+        // Only set photo_status = "complete" when BOTH photos are in this
+        // single offline batch. If only one is here, the other may already
+        // be in Supabase — setting "partial" would incorrectly downgrade a
+        // previously "complete" row. Leave status nil in that case; the next
+        // loadEquipment() will read the accurate value from Supabase.
+        let newStatus: String? = (uploadedEquip && uploadedIso) ? "complete" : nil
+
         try await SupabaseService.shared.updatePhotoURLs(
             equipmentId:   upload.equipmentId,
             equipPhotoUrl: equipURL,
             isoPhotoUrl:   isoURL,
-            placardUrl:    placardURL
+            placardUrl:    placardURL,
+            photoStatus:   newStatus,
+            hasEquipPhoto: uploadedEquip ? true : nil,
+            hasIsoPhoto:   uploadedIso   ? true : nil
         )
     }
 
@@ -175,29 +188,8 @@ final class OfflineStorageService {
             .sorted { $0.queuedAt < $1.queuedAt }
     }
 
-    // MARK: - Private: Auto-flush on reconnect
-
-    private func startNetworkObservation() {
-        Task { [weak self] in
-            var prev = NetworkMonitor.shared.isConnected
-            while !Task.isCancelled {
-                // Wait for the next change to isConnected
-                await withCheckedContinuation { continuation in
-                    withObservationTracking {
-                        _ = NetworkMonitor.shared.isConnected
-                    } onChange: {
-                        continuation.resume()
-                    }
-                }
-                let now = NetworkMonitor.shared.isConnected
-                if now && !prev {
-                    // Just came back online — flush
-                    await self?.flushQueue()
-                }
-                prev = now
-            }
-        }
-    }
+    // Auto-flush removed — uploads are manual only.
+    // Call flushQueue() explicitly from the Upload button action.
 
     // MARK: - Private: File URLs
 

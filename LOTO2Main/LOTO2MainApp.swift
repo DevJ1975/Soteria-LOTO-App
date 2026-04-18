@@ -19,6 +19,7 @@ struct LOTO2MainApp: App {
             ZStack {
                 ContentView()
                     .environment(placardVM)
+                    .preferredColorScheme(.light)
 
                 if showSplash {
                     SplashView {
