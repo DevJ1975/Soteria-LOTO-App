@@ -76,8 +76,21 @@ final class PlacardViewModel {
     // MARK: - Upload State
 
     var isUploading:        Bool    = false
+    var uploadStep:         String  = ""      // current step label shown in progress overlay
     var uploadError:        String? = nil
     var savedOffline:       Bool    = false   // true = queued for later sync
+
+    // MARK: - Spanish Translation State
+
+    var spanishSaveError: String? = nil
+
+    /// One pending Spanish edit for a single energy step.
+    struct SpanishStepEdit {
+        let stepId: UUID
+        let tagDescriptionEs: String?
+        let isolationProcedureEs: String?
+        let methodOfVerificationEs: String?
+    }
 
     // MARK: - Search (debounced)
 
@@ -380,20 +393,74 @@ final class PlacardViewModel {
         guard let equipment = selectedEquipment else { return }
         await MainActor.run { isGeneratingPDF = true; pdfError = nil }
 
-        // Run the PDF rendering off the main thread
-        let photo1 = equipmentPhoto
-        let photo2 = disconnectPhoto
+        let photo1 = equipmentPhoto ?? existingEquipPhoto
+        let photo2 = disconnectPhoto ?? existingIsoPhoto
+        let steps  = energySteps
         let pdfData = await Task.detached(priority: .userInitiated) {
             await PDFGenerator.shared.generate(
                 equipment: equipment,
                 equipmentPhoto: photo1,
-                disconnectPhoto: photo2
+                disconnectPhoto: photo2,
+                energySteps: steps
             )
         }.value
 
         await MainActor.run {
             generatedPDFData = pdfData
             isGeneratingPDF  = false
+        }
+    }
+
+    // MARK: - Save Spanish Translations
+
+    /// Saves Spanish translations to Supabase and updates the local cache.
+    /// Returns true on success; sets spanishSaveError and returns false on failure.
+    @MainActor
+    func saveSpanishTranslations(equipment: Equipment,
+                                  notesEs: String?,
+                                  spanishReviewed: Bool,
+                                  stepEdits: [SpanishStepEdit]) async -> Bool {
+        spanishSaveError = nil
+        do {
+            // Update equipment-level Spanish fields
+            try await SupabaseService.shared.updateEquipmentSpanish(
+                equipmentId:     equipment.equipmentId,
+                notesEs:         notesEs,
+                spanishReviewed: spanishReviewed
+            )
+
+            // Update each energy step
+            for edit in stepEdits {
+                try await SupabaseService.shared.updateEnergyStepSpanish(
+                    stepId:               edit.stepId,
+                    tagDescriptionEs:     edit.tagDescriptionEs,
+                    isolationProcedureEs: edit.isolationProcedureEs,
+                    methodOfVerificationEs: edit.methodOfVerificationEs
+                )
+            }
+
+            // Mirror to local allEquipment cache so the list refreshes immediately
+            if let idx = allEquipment.firstIndex(where: { $0.equipmentId == equipment.equipmentId }) {
+                var updated = allEquipment[idx]
+                updated.notesEs         = notesEs
+                updated.spanishReviewed = spanishReviewed
+                allEquipment[idx] = updated
+            }
+
+            // Mirror to local energySteps so the form shows updated text without a re-fetch
+            for edit in stepEdits {
+                if let idx = energySteps.firstIndex(where: { $0.id == edit.stepId }) {
+                    energySteps[idx].tagDescriptionEs         = edit.tagDescriptionEs
+                    energySteps[idx].isolationProcedureEs     = edit.isolationProcedureEs
+                    energySteps[idx].methodOfVerificationEs   = edit.methodOfVerificationEs
+                }
+            }
+
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            return true
+        } catch {
+            spanishSaveError = error.localizedDescription
+            return false
         }
     }
 
@@ -412,9 +479,10 @@ final class PlacardViewModel {
         }
 
         isUploading  = true
+        uploadStep   = "Preparing…"
         uploadError  = nil
         savedOffline = false
-        defer { isUploading = false }
+        defer { isUploading = false; uploadStep = "" }
 
         do {
             var equipURL: String?
@@ -426,21 +494,25 @@ final class PlacardViewModel {
             let isoImg   = disconnectPhoto ?? existingIsoPhoto
 
             if let img = equipImg, let data = img.compressedJPEG() {
+                uploadStep = "Uploading equipment photo…"
                 equipURL = try await SupabaseService.shared.uploadPhoto(
                     imageData: data, equipmentId: equipment.equipmentId, suffix: "EQUIP"
                 )
             }
             if let img = isoImg, let data = img.compressedJPEG() {
+                uploadStep = "Uploading isolation photo…"
                 isoURL = try await SupabaseService.shared.uploadPhoto(
                     imageData: data, equipmentId: equipment.equipmentId, suffix: "ISO"
                 )
             }
             if let pdf = generatedPDFData {
+                uploadStep = "Uploading PDF placard…"
                 pdfURL = try await SupabaseService.shared.uploadPDF(
                     data: pdf, equipmentId: equipment.equipmentId
                 )
             }
 
+            uploadStep = "Saving to database…"
             let willHaveEquip = equipURL != nil || equipment.hasEquipPhoto
             let willHaveIso   = isoURL   != nil || equipment.hasIsoPhoto
             let newStatus     = willHaveEquip && willHaveIso ? "complete"
@@ -460,13 +532,16 @@ final class PlacardViewModel {
             isoPhotoUploaded   = isoURL   != nil
             UINotificationFeedbackGenerator().notificationOccurred(.success)
 
-            // Also flush any placards that were queued while offline
-            await OfflineStorageService.shared.flushQueue()
+            // Flush any placards queued while offline
+            if OfflineStorageService.shared.pendingCount > 0 {
+                uploadStep = "Syncing \(OfflineStorageService.shared.pendingCount) queued placard(s)…"
+                await OfflineStorageService.shared.flushQueue()
+            }
 
         } catch {
             // Upload failed mid-flight — queue so nothing is lost
             queueForLater(equipment: equipment)
-            uploadError = "Upload failed — queued for next manual sync."
+            uploadError = "Upload failed — queued for next manual sync.\n\n\(error.localizedDescription)"
         }
     }
 

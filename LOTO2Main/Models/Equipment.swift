@@ -34,6 +34,10 @@ struct Equipment: Codable, Identifiable, Hashable {
     var placardUrl: String?
     var notes: String?
 
+    // Spanish translation fields
+    var notesEs: String?
+    var spanishReviewed: Bool
+
     let createdAt: String?
     let updatedAt: String?
 
@@ -58,8 +62,39 @@ struct Equipment: Codable, Identifiable, Hashable {
         case isoPhotoUrl      = "iso_photo_url"
         case placardUrl       = "placard_url"
         case notes
+        case notesEs          = "notes_es"
+        case spanishReviewed  = "spanish_reviewed"
         case createdAt        = "created_at"
         case updatedAt        = "updated_at"
+    }
+
+    // MARK: - Custom Decoder (backward compat — new fields default safely)
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id                = try c.decode(UUID.self,   forKey: .id)
+        equipmentId       = try c.decode(String.self, forKey: .equipmentId)
+        description       = try c.decode(String.self, forKey: .description)
+        department        = try c.decode(String.self, forKey: .department)
+        prefix            = try c.decode(String.self, forKey: .prefix)
+        hasEquipPhoto     = try c.decode(Bool.self,   forKey: .hasEquipPhoto)
+        hasIsoPhoto       = try c.decode(Bool.self,   forKey: .hasIsoPhoto)
+        photoStatus       = try c.decode(String.self, forKey: .photoStatus)
+        needsEquipPhoto   = try c.decode(Bool.self,   forKey: .needsEquipPhoto)
+        needsIsoPhoto     = try c.decode(Bool.self,   forKey: .needsIsoPhoto)
+        needsVerification = try c.decode(Bool.self,   forKey: .needsVerification)
+        verified          = try c.decode(Bool.self,   forKey: .verified)
+        verifiedDate      = try c.decodeIfPresent(String.self, forKey: .verifiedDate)
+        verifiedBy        = try c.decodeIfPresent(String.self, forKey: .verifiedBy)
+        equipPhotoUrl     = try c.decodeIfPresent(String.self, forKey: .equipPhotoUrl)
+        isoPhotoUrl       = try c.decodeIfPresent(String.self, forKey: .isoPhotoUrl)
+        placardUrl        = try c.decodeIfPresent(String.self, forKey: .placardUrl)
+        notes             = try c.decodeIfPresent(String.self, forKey: .notes)
+        createdAt         = try c.decodeIfPresent(String.self, forKey: .createdAt)
+        updatedAt         = try c.decodeIfPresent(String.self, forKey: .updatedAt)
+        // New fields — safe defaults for cached JSON that pre-dates these columns
+        notesEs           = try c.decodeIfPresent(String.self, forKey: .notesEs)
+        spanishReviewed   = try c.decodeIfPresent(Bool.self,   forKey: .spanishReviewed) ?? false
     }
 
     // MARK: - Computed

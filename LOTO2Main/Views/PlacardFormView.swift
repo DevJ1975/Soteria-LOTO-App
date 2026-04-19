@@ -14,8 +14,8 @@ import PhotosUI
 struct PlacardFormView: View {
 
     let equipment: Equipment
+    let onClose: () -> Void
     @Environment(PlacardViewModel.self) private var vm
-    @Environment(\.dismiss) private var dismiss
 
     // Library picker state
     @State private var showEquipPicker   = false
@@ -32,6 +32,15 @@ struct PlacardFormView: View {
 
     // Preview sheet
     @State private var showPreview       = false
+
+    // Spanish editing sheet
+    @State private var showSpanishEdit   = false
+
+    // Upload feedback
+    @State private var uploadSucceeded   = false
+    @State private var showUploadError   = false
+    @State private var checkmarkScale:   CGFloat = 0
+    @State private var spinDegrees:      Double  = 0
 
     private enum PhotoTarget { case equipment, isolation }
 
@@ -59,6 +68,9 @@ struct PlacardFormView: View {
             .toolbar { navToolbar }
             .sheet(isPresented: $showPreview) {
                 PlacardPreviewView().environment(vm)
+            }
+            .sheet(isPresented: $showSpanishEdit) {
+                SpanishEditSheet(equipment: equipment).environment(vm)
             }
             .sheet(isPresented: $showEquipCamera) {
                 CameraPickerView { image in
@@ -97,7 +109,97 @@ struct PlacardFormView: View {
                 Button("Cancel", role: .cancel) { reshootTarget = nil }
             }
         }
+        .overlay {
+            if vm.isUploading {
+                uploadProgressOverlay
+                    .transition(.opacity)
+            }
+        }
+        .overlay {
+            if uploadSucceeded {
+                uploadSuccessOverlay
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: vm.isUploading)
+        .animation(.easeInOut(duration: 0.2), value: uploadSucceeded)
         .tint(Color.brandDeepIndigo)
+    }
+
+    // MARK: - Upload Progress Overlay
+
+    private var uploadProgressOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+            VStack(spacing: 24) {
+                // Spinning arc ring
+                ZStack {
+                    Circle()
+                        .stroke(Color.white.opacity(0.25), lineWidth: 6)
+                        .frame(width: 72, height: 72)
+                    Circle()
+                        .trim(from: 0, to: 0.65)
+                        .stroke(Color.white,
+                                style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                        .frame(width: 72, height: 72)
+                        .rotationEffect(.degrees(spinDegrees))
+                        .onAppear {
+                            spinDegrees = 0
+                            withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                                spinDegrees = 360
+                            }
+                        }
+                    Image(systemName: "icloud.and.arrow.up")
+                        .font(.title2)
+                        .foregroundStyle(.white)
+                }
+
+                VStack(spacing: 6) {
+                    Text("Uploading Placard")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    Text(vm.uploadStep)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.75))
+                        .multilineTextAlignment(.center)
+                        .animation(.default, value: vm.uploadStep)
+                }
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 36)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
+            .shadow(color: .black.opacity(0.4), radius: 24)
+        }
+    }
+
+    // MARK: - Upload Success Overlay
+
+    private var uploadSuccessOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+            VStack(spacing: 16) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 72))
+                    .foregroundStyle(.green)
+                    .scaleEffect(checkmarkScale)
+                    .onAppear {
+                        checkmarkScale = 0
+                        withAnimation(.spring(response: 0.45, dampingFraction: 0.55)) {
+                            checkmarkScale = 1.0
+                        }
+                    }
+                Text("Upload Complete")
+                    .font(.title2.bold())
+                    .foregroundStyle(.white)
+                Text("Photos synced to Supabase")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 36)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
+            .shadow(color: .black.opacity(0.4), radius: 24)
+        }
     }
 
     // MARK: - Header Band (yellow)
@@ -222,8 +324,8 @@ struct PlacardFormView: View {
 
     private var colorCodeBar: some View {
         HStack(spacing: 0) {
-            ForEach(energyCodes, id: \.0) { code, label in
-                Text("\(code) = \(label)")
+            ForEach(EnergyCode.all, id: \.code) { ec in
+                Text("\(ec.code) = \(ec.labelEn)")
                     .font(.system(size: 7, weight: .bold))
                     .frame(maxWidth: .infinity)
             }
@@ -448,14 +550,7 @@ struct PlacardFormView: View {
     }
 
     private func energyTypeColor(_ type: String) -> Color {
-        switch type {
-        case "E":  return Color(red: 1, green: 0.85, blue: 0)    // yellow (electrical)
-        case "H":  return Color(red: 0.08, green: 0.47, blue: 0.78) // blue (hydraulic)
-        case "P":  return Color(red: 0.6, green: 0.6, blue: 0.6)  // gray (pneumatic)
-        case "G":  return Color(red: 0.2, green: 0.6, blue: 0.2)  // green (gas)
-        case "M":  return Color(red: 0.75, green: 0.08, blue: 0.08) // red (mechanical)
-        default:   return Color.brandDeepIndigo
-        }
+        EnergyCode.forType(type)?.color ?? Color.brandDeepIndigo
     }
 
     private func tableHeader(_ text: String) -> some View {
@@ -481,7 +576,7 @@ struct PlacardFormView: View {
 
     @ToolbarContentBuilder
     private var navToolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) { Button("Close") { dismiss() } }
+        ToolbarItem(placement: .topBarLeading) { Button("Close") { onClose() } }
 
         // Next equipment in the current filtered list
         if let next = vm.nextEquipment {
@@ -500,10 +595,25 @@ struct PlacardFormView: View {
         // Upload button — manual sync
         ToolbarItem(placement: .topBarTrailing) {
             Button {
-                Task { await vm.uploadPhotosAndSave() }
+                uploadSucceeded = false
+                checkmarkScale  = 0
+                showUploadError = false
+                Task {
+                    await vm.uploadPhotosAndSave()
+                    if vm.uploadError != nil {
+                        showUploadError = true
+                    } else if !vm.savedOffline {
+                        uploadSucceeded = true
+                        try? await Task.sleep(for: .seconds(2.5))
+                        uploadSucceeded = false
+                    }
+                }
             } label: {
                 if vm.isUploading {
                     ProgressView().scaleEffect(0.8)
+                } else if uploadSucceeded {
+                    Label("Uploaded", systemImage: "checkmark.icloud.fill")
+                        .foregroundStyle(.green)
                 } else if vm.savedOffline {
                     Label("Queued", systemImage: "icloud.slash")
                         .foregroundStyle(.orange)
@@ -513,9 +623,24 @@ struct PlacardFormView: View {
             }
             .disabled(
                 vm.isUploading ||
-                vm.equipmentPhoto == nil && vm.disconnectPhoto == nil &&
-                vm.existingEquipPhoto == nil && vm.existingIsoPhoto == nil
+                (vm.equipmentPhoto == nil && vm.disconnectPhoto == nil &&
+                 vm.existingEquipPhoto == nil && vm.existingIsoPhoto == nil)
             )
+            .alert("Upload Failed", isPresented: $showUploadError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(vm.uploadError ?? "An unknown error occurred. The photos have been queued for your next upload attempt.")
+            }
+        }
+
+        // Spanish translation button
+        ToolbarItem(placement: .topBarTrailing) {
+            Button { showSpanishEdit = true } label: {
+                Label("Español", systemImage: equipment.spanishReviewed
+                      ? "checkmark.circle.fill" : "globe")
+                    .foregroundStyle(equipment.spanishReviewed ? .green : .primary)
+            }
+            .disabled(vm.isLoadingSteps && vm.energySteps.isEmpty)
         }
 
         // Generate PDF button
@@ -571,8 +696,201 @@ struct PlacardFormView: View {
 The purpose of this procedure is to establish mandatory requirements for the Control of Hazardous Energy at the Snak King facility in compliance with Cal/OSHA Title 8 §3314. This placard provides specific, standardized instructions to ensure that this equipment is isolated from all electrical, hydraulic, pneumatic, and gravity energy sources before any employee performs maintenance, cleaning, or clearing of jams. All employees must strictly adhere to these limitations.
 """
 
-    private let energyCodes: [(String, String)] = [
-        ("E","Electrical"),("G","Gas"),("H","Hydraulic"),
-        ("P","Pneumatic"),("N","None"),("O","Mechanical"),("OG","Comp. Gas")
-    ]
+}
+
+// MARK: - SpanishStepDraft (local editing state)
+
+private struct SpanishStepDraft {
+    var tagDescriptionEs: String = ""
+    var isolationProcedureEs: String = ""
+    var methodOfVerificationEs: String = ""
+}
+
+// MARK: - SpanishEditSheet
+
+private struct SpanishEditSheet: View {
+
+    let equipment: Equipment
+    @Environment(PlacardViewModel.self) private var vm
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var notesEsDraft:         String = ""
+    @State private var spanishReviewedDraft: Bool   = false
+    @State private var stepDrafts:           [UUID: SpanishStepDraft] = [:]
+    @State private var isSaving:             Bool   = false
+    @State private var saveError:            String? = nil
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                // Warning / Notes (Spanish)
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Advertencia / Notas")
+                            .font(.caption).foregroundStyle(.secondary)
+                        TextEditor(text: $notesEsDraft)
+                            .frame(minHeight: 72)
+                    }
+                } header: {
+                    Text("Bloque de Advertencia")
+                } footer: {
+                    Text("Aparece en el bloque rojo de la placa. Si está vacío, se muestra el texto predeterminado en español.")
+                        .font(.caption2)
+                }
+
+                // Reviewed toggle
+                Section {
+                    Toggle(isOn: $spanishReviewedDraft) {
+                        Label("Traducción revisada",
+                              systemImage: spanishReviewedDraft ? "checkmark.seal.fill" : "checkmark.seal")
+                            .foregroundStyle(spanishReviewedDraft ? .green : .primary)
+                    }
+                } footer: {
+                    Text("Marcar como revisada elimina la marca de agua \"BORRADOR\" de la página en español del PDF.")
+                        .font(.caption2)
+                }
+
+                // Energy step translations
+                if !vm.energySteps.isEmpty {
+                    ForEach(vm.energySteps) { step in
+                        let ec = EnergyCode.forType(step.energyType)
+                        Section {
+                            stepField("Etiqueta / Descripción",
+                                      binding: tagBinding(step.id),
+                                      placeholder: step.tagDescription ?? "")
+                            stepField("Procedimiento de Aislamiento",
+                                      binding: isoBinding(step.id),
+                                      placeholder: step.isolationProcedure ?? "")
+                            stepField("Método de Verificación",
+                                      binding: verBinding(step.id),
+                                      placeholder: step.methodOfVerification ?? "")
+                        } header: {
+                            HStack(spacing: 6) {
+                                Text(step.energyType)
+                                    .font(.caption.bold())
+                                    .padding(.horizontal, 5).padding(.vertical, 2)
+                                    .background(ec?.color ?? Color.secondary, in: RoundedRectangle(cornerRadius: 4))
+                                    .foregroundStyle(.white)
+                                Text("Paso \(step.stepNumber)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } else if vm.isLoadingSteps {
+                    Section {
+                        HStack {
+                            ProgressView()
+                            Text("Cargando pasos de energía…").foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    Section {
+                        Text("No hay pasos de energía cargados para este equipo.")
+                            .foregroundStyle(.secondary).font(.caption)
+                    }
+                }
+            }
+            .navigationTitle("Traducción al Español")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancelar") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Task { await save() }
+                    } label: {
+                        if isSaving { ProgressView().scaleEffect(0.8) }
+                        else        { Text("Guardar").bold() }
+                    }
+                    .disabled(isSaving)
+                }
+            }
+            .alert("Error al guardar", isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(saveError ?? "")
+            }
+        }
+        .onAppear { populate() }
+    }
+
+    // MARK: - Step field helper
+
+    @ViewBuilder
+    private func stepField(_ label: String, binding: Binding<String>, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            TextField(placeholder.isEmpty ? "(vacío)" : placeholder,
+                      text: binding, axis: .vertical)
+                .lineLimit(2...)
+                .font(.subheadline)
+        }
+        .padding(.vertical, 2)
+    }
+
+    // MARK: - Bindings into stepDrafts dict
+
+    private func tagBinding(_ id: UUID) -> Binding<String> {
+        Binding(get: { stepDrafts[id]?.tagDescriptionEs ?? "" },
+                set: { stepDrafts[id, default: SpanishStepDraft()].tagDescriptionEs = $0 })
+    }
+    private func isoBinding(_ id: UUID) -> Binding<String> {
+        Binding(get: { stepDrafts[id]?.isolationProcedureEs ?? "" },
+                set: { stepDrafts[id, default: SpanishStepDraft()].isolationProcedureEs = $0 })
+    }
+    private func verBinding(_ id: UUID) -> Binding<String> {
+        Binding(get: { stepDrafts[id]?.methodOfVerificationEs ?? "" },
+                set: { stepDrafts[id, default: SpanishStepDraft()].methodOfVerificationEs = $0 })
+    }
+
+    // MARK: - Populate from live data
+
+    private func populate() {
+        notesEsDraft         = equipment.notesEs ?? ""
+        spanishReviewedDraft = equipment.spanishReviewed
+        for step in vm.energySteps {
+            stepDrafts[step.id] = SpanishStepDraft(
+                tagDescriptionEs:         step.tagDescriptionEs         ?? "",
+                isolationProcedureEs:     step.isolationProcedureEs     ?? "",
+                methodOfVerificationEs:   step.methodOfVerificationEs   ?? ""
+            )
+        }
+    }
+
+    // MARK: - Save
+
+    private func save() async {
+        isSaving = true
+        defer { isSaving = false }
+
+        let edits = vm.energySteps.map { step in
+            let d = stepDrafts[step.id]
+            return PlacardViewModel.SpanishStepEdit(
+                stepId:               step.id,
+                tagDescriptionEs:     d?.tagDescriptionEs.nonEmpty,
+                isolationProcedureEs: d?.isolationProcedureEs.nonEmpty,
+                methodOfVerificationEs: d?.methodOfVerificationEs.nonEmpty
+            )
+        }
+
+        let ok = await vm.saveSpanishTranslations(
+            equipment:       equipment,
+            notesEs:         notesEsDraft.nonEmpty,
+            spanishReviewed: spanishReviewedDraft,
+            stepEdits:       edits
+        )
+
+        if ok { dismiss() } else { saveError = vm.spanishSaveError ?? "Error desconocido." }
+    }
+}
+
+// MARK: - String.nonEmpty helper
+
+private extension String {
+    /// Returns nil if the string is empty, otherwise self.
+    var nonEmpty: String? { isEmpty ? nil : self }
 }

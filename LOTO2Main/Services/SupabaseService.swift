@@ -113,6 +113,7 @@ final class SupabaseService {
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue(key,             forHTTPHeaderField: "apikey")
         request.setValue("image/jpeg",    forHTTPHeaderField: "Content-Type")
+        request.setValue("true",          forHTTPHeaderField: "x-upsert")   // overwrite on re-shoot
         request.httpBody       = imageData
 
         let (data, response) = try await session.data(for: request)
@@ -153,6 +154,60 @@ final class SupabaseService {
         var request        = URLRequest(url: url)
         request.httpMethod = "PATCH"
         request.setValue("return=minimal",   forHTTPHeaderField: "Prefer")
+        addHeaders(&request)
+        request.httpBody   = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data)
+    }
+
+    // MARK: - Update Spanish Equipment Fields
+
+    /// Patches the equipment row with Spanish notes and the reviewed flag.
+    func updateEquipmentSpanish(equipmentId: String,
+                                 notesEs: String?,
+                                 spanishReviewed: Bool) async throws {
+        guard ConfigService.shared.isFullyConfigured else { throw SupabaseError.notConfigured }
+        guard !equipmentId.isEmpty else { throw SupabaseError.invalidURL }
+
+        let encoded   = equipmentId.addingPercentEncoding(withAllowedCharacters: .urlQueryValue) ?? equipmentId
+        let urlString = "\(base)/rest/v1/loto_equipment?equipment_id=eq.\(encoded)"
+        guard let url = URL(string: urlString) else { throw SupabaseError.invalidURL }
+
+        var body: [String: Any] = ["spanish_reviewed": spanishReviewed]
+        if let notes = notesEs { body["notes_es"] = notes }
+
+        var request        = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+        addHeaders(&request)
+        request.httpBody   = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data)
+    }
+
+    // MARK: - Update Spanish Energy Step Fields
+
+    /// Patches a single energy step row with Spanish translation fields.
+    func updateEnergyStepSpanish(stepId: UUID,
+                                  tagDescriptionEs: String?,
+                                  isolationProcedureEs: String?,
+                                  methodOfVerificationEs: String?) async throws {
+        guard ConfigService.shared.isFullyConfigured else { throw SupabaseError.notConfigured }
+
+        let urlString = "\(base)/rest/v1/loto_energy_steps?id=eq.\(stepId.uuidString)"
+        guard let url = URL(string: urlString) else { throw SupabaseError.invalidURL }
+
+        var body: [String: Any] = [:]
+        if let t = tagDescriptionEs        { body["tag_description_es"]        = t }
+        if let i = isolationProcedureEs    { body["isolation_procedure_es"]    = i }
+        if let m = methodOfVerificationEs  { body["method_of_verification_es"] = m }
+        guard !body.isEmpty else { return }
+
+        var request        = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
         addHeaders(&request)
         request.httpBody   = try JSONSerialization.data(withJSONObject: body)
 
