@@ -301,7 +301,7 @@ struct EquipmentListView: View {
     private var detailColumn: some View {
         Group {
             if let equipment = selectedEquipment {
-                PlacardFormView(equipment: equipment)
+                PlacardFormView(equipment: equipment, onClose: { selectedEquipment = nil })
                     .environment(vm)
                     .id(equipment.id)
             } else {
