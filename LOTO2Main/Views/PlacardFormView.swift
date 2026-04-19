@@ -42,6 +42,7 @@ struct PlacardFormView: View {
     // Upload feedback
     @State private var uploadSucceeded   = false
     @State private var showUploadError   = false
+    @State private var showPhotoLoadError = false   // photo library transfer failed
     @State private var checkmarkScale:   CGFloat = 0
     @State private var spinDegrees:      Double  = 0
 
@@ -93,6 +94,19 @@ struct PlacardFormView: View {
             }
             .onChange(of: isoPickerItem) { _, item in
                 Task { await loadPhoto(item: item, type: .isolation) }
+            }
+            .alert("Photo Load Failed", isPresented: $showPhotoLoadError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Could not load the selected photo. Try taking a photo with the camera instead.")
+            }
+            .alert("Low Storage", isPresented: Binding(
+                get: { vm.lowStorageWarning },
+                set: { if !$0 { vm.lowStorageWarning = false } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Less than 100 MB of storage is available. Photos may fail to save. Free up space on the iPad before continuing.")
             }
             .confirmationDialog(
                 "A photo already exists for this equipment. Replace it?",
@@ -642,6 +656,7 @@ struct PlacardFormView: View {
             }
         }
 
+
         // Edit energy steps button
         ToolbarItem(placement: .topBarTrailing) {
             Button { showStepEdit = true } label: {
@@ -682,9 +697,15 @@ struct PlacardFormView: View {
 
     private func loadPhoto(item: PhotosPickerItem?, type: LOTOPhotoType) async {
         guard let item else { return }
-        if let data  = try? await item.loadTransferable(type: Data.self),
-           let image = UIImage(data: data) {
-            vm.photoTaken(image, type: type)
+        do {
+            if let data  = try await item.loadTransferable(type: Data.self),
+               let image = UIImage(data: data) {
+                vm.photoTaken(image, type: type)
+            } else {
+                showPhotoLoadError = true
+            }
+        } catch {
+            showPhotoLoadError = true
         }
     }
 

@@ -16,9 +16,10 @@ struct EquipmentListView: View {
     @State private var selectedEquipment:  Equipment?
     @State private var showBatchPrint      = false
     @State private var columnVisibility    = NavigationSplitViewVisibility.all
-    @State private var statusFilter:       StatusFilter = .all
-    @State private var sortOrder:          SortOrder    = .equipmentId
-    @State private var flaggedIDs:         Set<String>  = []   // session-only follow-up flags
+    @State private var statusFilter:         StatusFilter = .all
+    @State private var sortOrder:            SortOrder    = .equipmentId
+    @State private var flaggedIDs:           Set<String>  = []   // session-only follow-up flags
+    @State private var showDecommissioned:   Bool         = false
 
     // MARK: - Enums
 
@@ -229,6 +230,19 @@ struct EquipmentListView: View {
                     Image(systemName: "arrow.up.arrow.down")
                 }
             }
+
+            // Show / hide decommissioned equipment
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showDecommissioned.toggle() }
+                } label: {
+                    Label(
+                        showDecommissioned ? "Hide Decommissioned" : "Show Decommissioned",
+                        systemImage: showDecommissioned ? "archivebox.fill" : "archivebox"
+                    )
+                }
+                .foregroundStyle(showDecommissioned ? Color.statusWarning : .primary)
+            }
         }
         .onChange(of: selectedEquipment) { _, equipment in
             if let equipment { vm.select(equipment) }
@@ -281,7 +295,8 @@ struct EquipmentListView: View {
 
     private func chipCount(for filter: StatusFilter) -> Int {
         let base = vm.searchText.isEmpty ? vm.allEquipment : vm.filteredEquipment
-        let deptItems = selectedDepartment.map { d in base.filter { $0.department == d } } ?? base
+        let deptItems = (selectedDepartment.map { d in base.filter { $0.department == d } } ?? base)
+            .filter { showDecommissioned || !vm.isDecommissioned($0) }
         switch filter {
         case .all:        return deptItems.count
         case .needsPhoto: return deptItems.filter { needsPhotoFilter($0) }.count
@@ -331,6 +346,21 @@ struct EquipmentListView: View {
             groups = groups.filter { $0.department == dept }
         }
 
+        // Decommissioned filter — hidden by default, shown at bottom of each group when toggled on
+        if !showDecommissioned {
+            groups = groups.compactMap { group in
+                let active = group.items.filter { !vm.isDecommissioned($0) }
+                return active.isEmpty ? nil : (department: group.department, items: active)
+            }
+        } else {
+            // Active items first, decommissioned at the bottom
+            groups = groups.map { group in
+                let active  = group.items.filter { !vm.isDecommissioned($0) }
+                let retired = group.items.filter {  vm.isDecommissioned($0) }
+                return (department: group.department, items: active + retired)
+            }.filter { !$0.items.isEmpty }
+        }
+
         // Status filter chips (#1 adds .needsPhoto)
         switch statusFilter {
         case .all: break
@@ -371,6 +401,19 @@ struct EquipmentListView: View {
             ForEach(group.items) { item in
                 equipmentRow(item)
                     .tag(item)
+                    // Swipe leading: decommission / restore
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        let isRetired = vm.isDecommissioned(item)
+                        Button {
+                            withAnimation { vm.toggleDecommissioned(item) }
+                        } label: {
+                            Label(
+                                isRetired ? "Restore" : "Decommission",
+                                systemImage: isRetired ? "arrow.uturn.backward.circle" : "archivebox"
+                            )
+                        }
+                        .tint(isRetired ? Color.statusSuccess : Color.secondary)
+                    }
                     // Swipe trailing: flag for follow-up (#9)
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button {
@@ -393,16 +436,27 @@ struct EquipmentListView: View {
     }
 
     private func equipmentRow(_ equipment: Equipment) -> some View {
-        HStack(spacing: 12) {
+        let retired = vm.isDecommissioned(equipment)
+
+        return HStack(spacing: 12) {
             Circle()
-                .fill(statusColor(equipment.photoStatus))
+                .fill(retired ? Color.secondary : statusColor(equipment.photoStatus))
                 .frame(width: 9, height: 9)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(equipment.equipmentId)
                         .font(.system(.body, design: .monospaced).bold())
-                        .foregroundStyle(Color.brandDeepIndigo)
+                        .foregroundStyle(retired ? Color.secondary : Color.brandDeepIndigo)
+                        .strikethrough(retired, color: .secondary)
+                    // Decommissioned badge
+                    if retired {
+                        Text("DECOMMISSIONED")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(Color.secondary, in: Capsule())
+                    }
                     // Flag indicator (#9)
                     if flaggedIDs.contains(equipment.equipmentId) {
                         Image(systemName: "flag.fill")
@@ -413,44 +467,48 @@ struct EquipmentListView: View {
                 Text(equipment.shortName)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .strikethrough(retired, color: .secondary)
                     .lineLimit(1)
             }
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 3) {
-                // Photo count badge: "0/2", "1/2", "2/2" (#2)
-                let needed   = (equipment.needsEquipPhoto ? 1 : 0) + (equipment.needsIsoPhoto ? 1 : 0)
-                let captured = (equipment.hasEquipPhoto   ? 1 : 0) + (equipment.hasIsoPhoto   ? 1 : 0)
-                if needed > 0 {
-                    Text("\(captured)/\(needed)")
+            if !retired {
+                VStack(alignment: .trailing, spacing: 3) {
+                    // Photo count badge: "0/2", "1/2", "2/2" (#2)
+                    let needed   = (equipment.needsEquipPhoto ? 1 : 0) + (equipment.needsIsoPhoto ? 1 : 0)
+                    let captured = (equipment.hasEquipPhoto   ? 1 : 0) + (equipment.hasIsoPhoto   ? 1 : 0)
+                    if needed > 0 {
+                        Text("\(captured)/\(needed)")
+                            .font(.caption2.bold())
+                            .foregroundStyle(captured == needed ? Color.statusSuccess : .secondary)
+                    }
+
+                    // Offline sync pending badge (#5)
+                    let localEquip = PhotoStorageService.shared.hasLocal(equipment: equipment, type: .equipment)
+                    let localIso   = PhotoStorageService.shared.hasLocal(equipment: equipment, type: .isolation)
+                    if (localEquip && !equipment.hasEquipPhoto) || (localIso && !equipment.hasIsoPhoto) {
+                        Image(systemName: "icloud.slash")
+                            .font(.caption2)
+                            .foregroundStyle(Color.statusWarning)
+                    }
+
+                    Text(equipment.photoStatus.capitalized)
                         .font(.caption2.bold())
-                        .foregroundStyle(captured == needed ? Color.statusSuccess : .secondary)
-                }
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(statusColor(equipment.photoStatus).opacity(0.15))
+                        .foregroundStyle(statusColor(equipment.photoStatus))
+                        .clipShape(Capsule())
 
-                // Offline sync pending badge (#5)
-                let localEquip = PhotoStorageService.shared.hasLocal(equipment: equipment, type: .equipment)
-                let localIso   = PhotoStorageService.shared.hasLocal(equipment: equipment, type: .isolation)
-                if (localEquip && !equipment.hasEquipPhoto) || (localIso && !equipment.hasIsoPhoto) {
-                    Image(systemName: "icloud.slash")
-                        .font(.caption2)
-                        .foregroundStyle(Color.statusWarning)
-                }
-
-                Text(equipment.photoStatus.capitalized)
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(statusColor(equipment.photoStatus).opacity(0.15))
-                    .foregroundStyle(statusColor(equipment.photoStatus))
-                    .clipShape(Capsule())
-
-                if equipment.verified {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.caption2)
-                        .foregroundStyle(Color.statusSuccess)
+                    if equipment.verified {
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Color.statusSuccess)
+                    }
                 }
             }
         }
+        .opacity(retired ? 0.55 : 1.0)
         .padding(.vertical, 2)
         .contentShape(Rectangle())
     }

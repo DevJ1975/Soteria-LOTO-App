@@ -120,9 +120,11 @@ final class PhotoStorageService {
 
     // MARK: - JPEG with Embedded Metadata
 
-    private func jpegWithMetadata(image: UIImage,
-                                   equipment: Equipment,
-                                   type: LOTOPhotoType) -> Data? {
+    // nonisolated: UIGraphicsImageRenderer and CGImageDestination are thread-safe;
+    // called from Task.detached so must not inherit main-actor isolation.
+    private nonisolated func jpegWithMetadata(image: UIImage,
+                                               equipment: Equipment,
+                                               type: LOTOPhotoType) -> Data? {
         // Normalise orientation so draw is always correct
         let normalised = normaliseOrientation(image)
         guard let cgImage = normalised.cgImage else { return nil }
@@ -164,7 +166,7 @@ final class PhotoStorageService {
 
     // MARK: - Helpers
 
-    private func normaliseOrientation(_ image: UIImage) -> UIImage {
+    private nonisolated func normaliseOrientation(_ image: UIImage) -> UIImage {
         guard image.imageOrientation != .up else { return image }
         let renderer = UIGraphicsImageRenderer(size: image.size)
         return renderer.image { _ in image.draw(at: .zero) }

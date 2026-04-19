@@ -126,24 +126,19 @@ struct BatchPrintView: View {
             return
         }
 
-        // Pre-load local photos (fast index lookups, no network).
-        var photoCache: [String: (UIImage?, UIImage?)] = [:]
-        for item in items {
-            let equip = PhotoStorageService.shared.loadLocal(equipment: item, type: .equipment)
-            let iso   = PhotoStorageService.shared.loadLocal(equipment: item, type: .isolation)
-            if equip != nil || iso != nil {
-                photoCache[item.equipmentId] = (equip, iso)
-            }
-        }
-
-        // Generate all page images on a background thread so the main thread
-        // stays free (large departments can take several seconds to render).
+        // Build the combined PDF on the main actor (PDFGenerator is @MainActor).
+        // Photos are loaded lazily per-item inside buildCombinedPDF so we never
+        // hold an entire department's worth of UIImages in memory at the same time.
         let combined = await Task.detached(priority: .userInitiated) {
-            await buildCombinedPDF(items: items, photoCache: photoCache)
+            await buildCombinedPDF(items: items)
         }.value
 
-        let name = "\(selectedDepartment)_LOTO_Batch.pdf"
-            .replacingOccurrences(of: " ", with: "_")
+        // Sanitize department name — a raw "/" would corrupt the temp path
+        let safeDept = selectedDepartment.unicodeScalars.map { s -> String in
+            let c = Character(s)
+            return (c.isLetter || c.isNumber || c == "-") ? String(c) : "_"
+        }.joined()
+        let name = "\(safeDept)_LOTO_Batch.pdf"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
         if (try? combined.write(to: url)) != nil {
             batchPDFURL = url
@@ -156,8 +151,7 @@ struct BatchPrintView: View {
     // PDFGenerator is @MainActor, so each page hops to main; the outer Task is
     // detached to prevent the call-site from blocking the SwiftUI render loop.
     @MainActor
-    private func buildCombinedPDF(items: [Equipment],
-                                   photoCache: [String: (UIImage?, UIImage?)]) -> Data {
+    private func buildCombinedPDF(items: [Equipment]) -> Data {
         let pageSize = CGSize(width: 792, height: 612)
         let pageRect = CGRect(origin: .zero, size: pageSize)
         let renderer = UIGraphicsPDFRenderer(bounds: pageRect)
@@ -165,25 +159,32 @@ struct BatchPrintView: View {
         return renderer.pdfData { ctx in
             for equipment in items {
                 ctx.beginPage()
-                let (equip, iso) = photoCache[equipment.equipmentId] ?? (nil, nil)
+
+                // Load photos lazily one item at a time — avoids holding the entire
+                // department's worth of UIImages in memory simultaneously.
+                let equip = PhotoStorageService.shared.loadLocal(equipment: equipment, type: .equipment)
+                let iso   = PhotoStorageService.shared.loadLocal(equipment: equipment, type: .isolation)
+
                 let pageData = PDFGenerator.shared.generate(
                     equipment: equipment,
                     equipmentPhoto: equip,
                     disconnectPhoto: iso
                 )
-                if let doc = PDFDocument(data: pageData),
-                   let page = doc.page(at: 0) {
+
+                // Draw the English page (index 0) directly into the PDF context —
+                // no intermediate bitmap rasterization, preserves vector quality.
+                if let doc    = PDFDocument(data: pageData),
+                   let page   = doc.page(at: 0),
+                   let cgPage = page.pageRef {
                     let b = page.bounds(for: .mediaBox)
-                    let imgSize = CGSize(width: b.width, height: b.height)
-                    let imgRenderer = UIGraphicsImageRenderer(size: imgSize)
-                    let img = imgRenderer.image { imgCtx in
-                        UIColor.white.setFill()
-                        imgCtx.fill(CGRect(origin: .zero, size: imgSize))
-                        imgCtx.cgContext.translateBy(x: 0, y: imgSize.height)
-                        imgCtx.cgContext.scaleBy(x: 1, y: -1)
-                        page.draw(with: .mediaBox, to: imgCtx.cgContext)
+                    let pdfCtx = ctx.cgContext
+                    pdfCtx.saveGState()
+                    if b.width > 0, b.height > 0 {
+                        pdfCtx.scaleBy(x: pageRect.width / b.width,
+                                       y: pageRect.height / b.height)
                     }
-                    img.draw(in: pageRect)
+                    pdfCtx.drawPDFPage(cgPage)
+                    pdfCtx.restoreGState()
                 }
             }
         }

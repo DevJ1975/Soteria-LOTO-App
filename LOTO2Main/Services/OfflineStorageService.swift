@@ -17,7 +17,7 @@ import Observation
 
 // MARK: - PendingUpload
 
-struct PendingUpload: Codable, Identifiable {
+struct PendingUpload: Codable, Identifiable, Sendable {
     let id: UUID
     let equipmentId: String
     let queuedAt: Date
@@ -43,20 +43,37 @@ final class OfflineStorageService {
     // MARK: - Private
 
     private let dir: URL
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
 
     private init() {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         dir = docs.appendingPathComponent("PendingUploads", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        loadFromDisk()
+        // Read JSON metadata files in the background — with 300+ queued items
+        // reading hundreds of files synchronously in init() noticeably stalls startup.
+        // Raw Data bytes are read on the background thread (pure I/O); decoding happens
+        // on the main actor where PendingUpload's Codable conformance lives (Swift 6).
+        let loadDir = dir
+        Task.detached(priority: .utility) { [self] in
+            let files = (try? FileManager.default.contentsOfDirectory(
+                at: loadDir, includingPropertiesForKeys: nil
+            )) ?? []
+            let rawData: [Data] = files
+                .filter { $0.pathExtension == "json" }
+                .compactMap { try? Data(contentsOf: $0) }
+            await MainActor.run { [self] in
+                let decoder = JSONDecoder()
+                self.pendingUploads = rawData
+                    .compactMap { try? decoder.decode(PendingUpload.self, from: $0) }
+                    .sorted { $0.queuedAt < $1.queuedAt }
+            }
+        }
     }
 
     // MARK: - Queue an Upload
 
     /// Call this when offline or when an upload fails.
-    /// Photo/PDF data is written to disk immediately so the app can be closed safely.
+    /// State is updated immediately on the main thread; file writes are dispatched
+    /// to a background task so the main thread is never blocked by multi-MB JPEG writes.
     @MainActor
     func queue(
         equipmentId: String,
@@ -74,17 +91,27 @@ final class OfflineStorageService {
             hasPDF: pdf != nil
         )
 
-        // Write binary files
-        if let d = equipPhoto  { try? d.write(to: photoURL(id, suffix: "equip")) }
-        if let d = isoPhoto    { try? d.write(to: photoURL(id, suffix: "iso"))   }
-        if let d = pdf         { try? d.write(to: photoURL(id, suffix: "pdf"))   }
-
-        // Write metadata JSON
-        if let data = try? encoder.encode(record) {
-            try? data.write(to: metaURL(id), options: .atomic)
-        }
-
+        // Update in-memory state immediately — UI sees the queued item right away
         pendingUploads.append(record)
+
+        // Encode metadata on the main actor before crossing to background.
+        // PendingUpload's Codable conformance is main-actor-scoped in Swift 6,
+        // so encode/decode must not happen in a nonisolated Task.detached context.
+        let metaData = try? JSONEncoder().encode(record)
+
+        // Capture file paths (value types) before crossing the actor boundary.
+        // File writes can be several MB — always run off the main thread.
+        let equipPath = photoURL(id, suffix: "equip")
+        let isoPath   = photoURL(id, suffix: "iso")
+        let pdfPath   = photoURL(id, suffix: "pdf")
+        let metaPath  = metaURL(id)
+
+        Task.detached(priority: .utility) {
+            if let d = equipPhoto { try? d.write(to: equipPath, options: .atomic) }
+            if let d = isoPhoto   { try? d.write(to: isoPath,  options: .atomic) }
+            if let d = pdf        { try? d.write(to: pdfPath,  options: .atomic) }
+            if let data = metaData { try? data.write(to: metaPath, options: .atomic) }
+        }
     }
 
     // MARK: - Flush Queue
@@ -179,24 +206,6 @@ final class OfflineStorageService {
             hasEquipPhoto: uploadedEquip ? true : nil,
             hasIsoPhoto:   uploadedIso   ? true : nil
         )
-    }
-
-    // MARK: - Private: Disk Load
-
-    private func loadFromDisk() {
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: nil
-        )) ?? []
-
-        pendingUploads = files
-            .filter { $0.pathExtension == "json" }
-            .compactMap { url in
-                guard let data = try? Data(contentsOf: url),
-                      let record = try? decoder.decode(PendingUpload.self, from: data)
-                else { return nil }
-                return record
-            }
-            .sorted { $0.queuedAt < $1.queuedAt }
     }
 
     // Auto-flush removed — uploads are manual only.

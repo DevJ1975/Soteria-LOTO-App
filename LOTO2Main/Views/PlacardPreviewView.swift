@@ -15,6 +15,7 @@ struct PlacardPreviewView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var showUploadError = false
+    @State private var pdfShareURL: URL?   // cached once on appear; avoids disk write on every render
 
     var body: some View {
         NavigationStack {
@@ -31,6 +32,10 @@ struct PlacardPreviewView: View {
             .navigationTitle("Placard Preview")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { navToolbar }
+            .onAppear {
+                // Write PDF to temp once on appear — ShareLink must not do this per render.
+                if let data = vm.generatedPDFData { pdfShareURL = makeShareURL(data: data) }
+            }
             .alert("Upload Failed", isPresented: $showUploadError) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -82,9 +87,9 @@ struct PlacardPreviewView: View {
         }
 
         ToolbarItem(placement: .topBarTrailing) {
-            if let data = vm.generatedPDFData {
+            if let url = pdfShareURL {
                 ShareLink(
-                    item: pdfDocument(from: data),
+                    item: url,
                     preview: SharePreview(
                         "LOTO Placard — \(vm.selectedEquipment?.equipmentId ?? "")",
                         image: Image(systemName: "doc.fill")
@@ -117,17 +122,24 @@ struct PlacardPreviewView: View {
                     Label("Save Photos", systemImage: "icloud.and.arrow.up")
                 }
             }
-            .disabled(vm.isUploading || (vm.equipmentPhoto == nil && vm.disconnectPhoto == nil))
+            // Matches PlacardFormView — also allow PDF-only uploads when no session photos
+            .disabled(
+                vm.isUploading ||
+                (vm.equipmentPhoto == nil && vm.disconnectPhoto == nil && vm.generatedPDFData == nil)
+            )
         }
     }
 
     // MARK: - Helpers
 
-    private func pdfDocument(from data: Data) -> URL {
-        let id = vm.selectedEquipment?.equipmentId ?? "placard"
+    /// Writes the PDF to a temp file once and returns the URL.
+    /// Called from .onAppear — NOT from the toolbar/view body — so the disk
+    /// write doesn't repeat on every SwiftUI re-render.
+    private func makeShareURL(data: Data) -> URL? {
+        let id   = vm.selectedEquipment?.equipmentId ?? "placard"
         let name = "\(id)_LOTO_Placard.pdf"
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-        try? data.write(to: url)
+        let url  = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        guard (try? data.write(to: url)) != nil else { return nil }
         return url
     }
 }
@@ -149,6 +161,8 @@ struct PDFKitView: UIViewRepresentable {
     }
 
     func updateUIView(_ pdfView: PDFView, context: Context) {
+        // PDFDocument(data:) is expensive — only set once; data never changes within this view.
+        guard pdfView.document == nil else { return }
         pdfView.document = PDFDocument(data: data)
     }
 }

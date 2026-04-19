@@ -35,9 +35,32 @@ final class PlacardViewModel {
     var departments:     [String]    = []
     var loadState:       LoadState   = .idle
 
+    // MARK: - Decommissioned Equipment (persisted locally across sessions)
+
+    private static let deprecatedKey = "loto.decommissioned_ids"
+    private(set) var decommissionedIDs: Set<String> = []
+
+    /// Toggles the decommissioned state for an equipment item and persists to UserDefaults.
+    func toggleDecommissioned(_ equipment: Equipment) {
+        if decommissionedIDs.contains(equipment.equipmentId) {
+            decommissionedIDs.remove(equipment.equipmentId)
+        } else {
+            decommissionedIDs.insert(equipment.equipmentId)
+        }
+        UserDefaults.standard.set(Array(decommissionedIDs), forKey: Self.deprecatedKey)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    func isDecommissioned(_ equipment: Equipment) -> Bool {
+        decommissionedIDs.contains(equipment.equipmentId)
+    }
+
     // MARK: - Init (load cache immediately so list appears before network responds)
 
     init() {
+        decommissionedIDs = Set(
+            UserDefaults.standard.stringArray(forKey: Self.deprecatedKey) ?? []
+        )
         if let cached = Self.loadCache() {
             allEquipment = cached
             departments  = Array(Set(cached.map { $0.department })).sorted()
@@ -79,6 +102,7 @@ final class PlacardViewModel {
     var uploadStep:         String  = ""      // current step label shown in progress overlay
     var uploadError:        String? = nil
     var savedOffline:       Bool    = false   // true = queued for later sync
+    var lowStorageWarning:  Bool    = false   // true = < 100 MB free when photo was taken
 
     // MARK: - Spanish Translation State
 
@@ -215,6 +239,17 @@ final class PlacardViewModel {
     /// then uploads to Supabase in the background. UI updates instantly.
     func photoTaken(_ image: UIImage, type: LOTOPhotoType) {
         guard let equipment = selectedEquipment else { return }
+
+        // Warn if storage is critically low (< 100 MB). A single compressed JPEG
+        // is ~1-3 MB, so this gives enough headroom to surface the warning before
+        // the disk fills up and silent write failures start occurring.
+        let homeURL = URL(fileURLWithPath: NSHomeDirectory())
+        if let available = try? homeURL
+                .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+                .volumeAvailableCapacityForImportantUsage,
+           available < 100_000_000 {
+            lowStorageWarning = true
+        }
 
         // 1. Update in-memory state immediately (UI sees photo right away)
         switch type {
@@ -599,7 +634,9 @@ final class PlacardViewModel {
         } catch {
             // Upload failed mid-flight — queue so nothing is lost
             queueForLater(equipment: equipment)
-            uploadError = "Upload failed. Photos saved locally and queued for your next manual sync."
+            // Include the real error so we can diagnose Supabase/network failures
+            let detail = (error as? SupabaseError)?.errorDescription ?? error.localizedDescription
+            uploadError = "Upload failed (\(detail)). Photos saved locally and queued for your next manual sync."
         }
     }
 
@@ -613,6 +650,15 @@ final class PlacardViewModel {
             isoPhoto:    isoData,
             pdf:         generatedPDFData
         )
+    }
+
+    // MARK: - Memory Pressure
+
+    /// Called when the OS sends a memory warning. Releases large reloadable images
+    /// that were downloaded from Supabase — they will be re-fetched on next selection.
+    func handleMemoryWarning() {
+        existingEquipPhoto = nil
+        existingIsoPhoto   = nil
     }
 
     // MARK: - Reset
@@ -629,12 +675,14 @@ final class PlacardViewModel {
         pdfError             = nil
         uploadError          = nil
         savedOffline         = false
+        lowStorageWarning    = false
         energySteps          = []
     }
 
     // MARK: - Private: Disk Cache
 
-    private static let cacheURL: URL = {
+    // nonisolated: pure FileManager URL computation, safe from any thread
+    private nonisolated static let cacheURL: URL = {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         return caches.appendingPathComponent("loto_equipment_cache.json")
     }()

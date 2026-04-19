@@ -41,6 +41,9 @@ final class SupabaseService {
     private var base:    String { ConfigService.shared.supabaseURL ?? "" }
     private var key:     String { ConfigService.shared.supabaseAnonKey ?? "" }
 
+    // ISO8601DateFormatter is thread-safe (documented by Apple) — safe to share.
+    private static let iso8601: ISO8601DateFormatter = ISO8601DateFormatter()
+
     private init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest  = 30
@@ -100,7 +103,7 @@ final class SupabaseService {
         guard ConfigService.shared.isFullyConfigured else { throw SupabaseError.notConfigured }
 
         let sanitized = sanitize(equipmentId)
-        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let timestamp = Self.iso8601.string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
             .replacingOccurrences(of: ".", with: "-")
         let filename  = "\(sanitized)_\(suffix)_\(timestamp).jpg"
@@ -204,7 +207,7 @@ final class SupabaseService {
 
         // Always send notes_es so the column can be cleared (NSNull → SQL NULL).
         // Omitting it when nil would leave a previously-saved value unchanged in Supabase.
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "spanish_reviewed": spanishReviewed,
             "notes_es": notesEs ?? NSNull()
         ]

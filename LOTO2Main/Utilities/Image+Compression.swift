@@ -69,7 +69,7 @@ extension UIImage {
         guard drawSize.width > 0, drawSize.height > 0 else { return nil }
         let format        = UIGraphicsImageRendererFormat.default()
         format.scale      = scale
-        format.opaque     = false
+        format.opaque     = true   // JPEG has no alpha; opaque=true uses RGB bitmap (~25% less memory)
         return UIGraphicsImageRenderer(size: drawSize, format: format).image { _ in
             self.draw(in: CGRect(origin: .zero, size: drawSize))
         }
