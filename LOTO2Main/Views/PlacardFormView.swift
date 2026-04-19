@@ -372,7 +372,8 @@ struct PlacardFormView: View {
                 existingImage: vm.existingEquipPhoto,
                 label: "Photo of Equipment",
                 systemIcon: "camera.fill",
-                hasUploaded: equipment.equipPhotoUrl != nil,
+                // Use vm state so the re-shoot dialog fires after an in-session upload too
+                hasUploaded: equipment.equipPhotoUrl != nil || vm.equipPhotoUploaded,
                 target: .equipment
             )
             .photosPicker(isPresented: $showEquipPicker,
@@ -387,7 +388,7 @@ struct PlacardFormView: View {
                 existingImage: vm.existingIsoPhoto,
                 label: "Photo of Isolation / Disconnect",
                 systemIcon: "bolt.slash.fill",
-                hasUploaded: equipment.isoPhotoUrl != nil,
+                hasUploaded: equipment.isoPhotoUrl != nil || vm.isoPhotoUploaded,
                 target: .isolation
             )
             .photosPicker(isPresented: $showIsoPicker,
@@ -627,10 +628,12 @@ struct PlacardFormView: View {
                     Label("Upload", systemImage: "icloud.and.arrow.up")
                 }
             }
+            // Disable when there is nothing NEW to upload:
+            // no session photos and no generated PDF.
+            // Existing remote photos don't count — they're already in Supabase.
             .disabled(
                 vm.isUploading ||
-                (vm.equipmentPhoto == nil && vm.disconnectPhoto == nil &&
-                 vm.existingEquipPhoto == nil && vm.existingIsoPhoto == nil)
+                (vm.equipmentPhoto == nil && vm.disconnectPhoto == nil && vm.generatedPDFData == nil)
             )
             .alert("Upload Failed", isPresented: $showUploadError) {
                 Button("OK", role: .cancel) {}
@@ -671,8 +674,7 @@ struct PlacardFormView: View {
                     Label("PDF", systemImage: "doc.badge.plus")
                 }
             }
-            .disabled(vm.isGeneratingPDF || (vm.equipmentPhoto == nil && vm.disconnectPhoto == nil
-                && vm.existingEquipPhoto == nil && vm.existingIsoPhoto == nil))
+            .disabled(vm.isGeneratingPDF)
         }
     }
 

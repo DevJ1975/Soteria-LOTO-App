@@ -202,8 +202,12 @@ final class SupabaseService {
         let urlString = "\(base)/rest/v1/loto_equipment?equipment_id=eq.\(encoded)"
         guard let url = URL(string: urlString) else { throw SupabaseError.invalidURL }
 
-        var body: [String: Any] = ["spanish_reviewed": spanishReviewed]
-        if let notes = notesEs { body["notes_es"] = notes }
+        // Always send notes_es so the column can be cleared (NSNull → SQL NULL).
+        // Omitting it when nil would leave a previously-saved value unchanged in Supabase.
+        var body: [String: Any] = [
+            "spanish_reviewed": spanishReviewed,
+            "notes_es": notesEs ?? NSNull()
+        ]
 
         var request        = URLRequest(url: url)
         request.httpMethod = "PATCH"

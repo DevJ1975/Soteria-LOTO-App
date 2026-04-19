@@ -71,17 +71,27 @@ final class PhotoStorageService {
         // even before the background write finishes.
         updateIndex(equipmentId: equipment.equipmentId, type: type, path: fileURL.path)
 
+        // Capture a value-type snapshot of the index AFTER the update.
+        // Passing the snapshot to the background task avoids a data race:
+        // Task.detached runs on a background thread while the main thread may
+        // concurrently mutate photoIndex for another save.
+        let indexSnapshot = photoIndex
+        let indexURL      = self.indexURL   // let — safe to capture
+
         // Encode JPEG + write to disk off the main thread.
+        // Strong [self] capture is safe: PhotoStorageService is a singleton that is
+        // never deallocated, so there is no retain cycle risk from this transient closure.
         let eq = equipment   // capture value type
-        Task.detached(priority: .utility) { [weak self] in
-            guard let self else { return }
+        Task.detached(priority: .utility) { [self] in
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let data = self.jpegWithMetadata(image: image, equipment: eq, type: type)
+            let data = jpegWithMetadata(image: image, equipment: eq, type: type)
                     ?? image.jpegData(compressionQuality: 0.85)
             guard let data else { return }
             try? data.write(to: fileURL, options: .atomic)
-            // Persist the updated index after the file is safely on disk.
-            self.saveIndex()
+            // Persist the snapshot — avoids reading self.photoIndex from background.
+            if let encoded = try? JSONEncoder().encode(indexSnapshot) {
+                try? encoded.write(to: indexURL, options: .atomic)
+            }
         }
 
         return fileURL
@@ -177,9 +187,6 @@ final class PhotoStorageService {
         case .isolation: entry.isoPath   = path
         }
         photoIndex[equipmentId] = entry
-        // saveIndex() is intentionally NOT called here — callers that perform
-        // async file writes call saveIndex() themselves after the write completes,
-        // to ensure the index on disk reflects actual files on disk.
     }
 
     private func loadIndex() {
@@ -187,11 +194,5 @@ final class PhotoStorageService {
               let decoded = try? JSONDecoder().decode([String: PhotoIndexEntry].self, from: data)
         else { return }
         photoIndex = decoded
-    }
-
-    private func saveIndex() {
-        if let data = try? JSONEncoder().encode(photoIndex) {
-            try? data.write(to: indexURL, options: .atomic)
-        }
     }
 }

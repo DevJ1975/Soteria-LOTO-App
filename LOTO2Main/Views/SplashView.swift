@@ -60,9 +60,11 @@ struct SplashView: View {
             tagOpacity = 1.0
         }
 
-        // Phase 3 — whole screen slides up and disappears
+        // Phase 3 — whole screen slides up and disappears.
+        // Use a large constant instead of UIScreen.main.bounds (deprecated iOS 16+).
+        // 1500 pt comfortably exceeds the tallest iPad Pro screen (1366 pt landscape).
         withAnimation(.easeInOut(duration: 0.5).delay(1.4)) {
-            slideUp = -UIScreen.main.bounds.height
+            slideUp = -1500
         }
 
         // Notify parent after animation completes

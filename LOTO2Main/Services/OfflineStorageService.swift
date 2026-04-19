@@ -57,6 +57,7 @@ final class OfflineStorageService {
 
     /// Call this when offline or when an upload fails.
     /// Photo/PDF data is written to disk immediately so the app can be closed safely.
+    @MainActor
     func queue(
         equipmentId: String,
         equipPhoto: Data?,
@@ -113,6 +114,7 @@ final class OfflineStorageService {
     // MARK: - Clear Entire Queue
 
     /// Removes every pending upload and its associated files from disk.
+    @MainActor
     func clearQueue() {
         let snapshot = pendingUploads
         for upload in snapshot { remove(id: upload.id) }
@@ -120,6 +122,7 @@ final class OfflineStorageService {
 
     // MARK: - Remove
 
+    @MainActor
     func remove(id: UUID) {
         pendingUploads.removeAll { $0.id == id }
         // Delete all associated files

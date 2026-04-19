@@ -110,6 +110,11 @@ final class PlacardViewModel {
     private(set) var filteredGroups: [(department: String, items: [Equipment])] = []
     private var searchTask: Task<Void, Never>?
 
+    // Tracks in-flight background tasks so they can be cancelled when
+    // the user switches to a different equipment item before they complete.
+    private var energyStepTask: Task<Void, Never>?
+    private var photoLoadTask:  Task<Void, Never>?
+
     // MARK: - Stats (cached)
 
     private(set) var countComplete = 0
@@ -333,6 +338,7 @@ final class PlacardViewModel {
         generatedPDFData       = nil
         pdfError               = nil
         uploadError            = nil
+        savedOffline           = false
         energySteps            = []
         equipPhotoUploaded     = false
         isoPhotoUploaded       = false
@@ -347,13 +353,20 @@ final class PlacardViewModel {
         existingEquipPhoto = nil
         existingIsoPhoto   = nil
 
-        Task { await loadEnergySteps(for: equipment.equipmentId) }
+        // Cancel any in-flight step fetch for the previously selected equipment.
+        energyStepTask?.cancel()
+        energyStepTask = Task { await loadEnergySteps(for: equipment.equipmentId) }
+
+        // Cancel any in-flight remote photo download for the previous equipment.
+        photoLoadTask?.cancel()
 
         // Only fetch remote previews for photos we don't have locally
         let needsEquip = equipmentPhoto  == nil
         let needsIso   = disconnectPhoto == nil
         if needsEquip || needsIso {
-            Task { await loadExistingPhotos(for: equipment, equip: needsEquip, iso: needsIso) }
+            photoLoadTask = Task {
+                await loadExistingPhotos(for: equipment, equip: needsEquip, iso: needsIso)
+            }
         }
     }
 
@@ -366,6 +379,9 @@ final class PlacardViewModel {
 
         if equip, let url = equipment.equipPhotoUrl {
             if let img = await fetchRemoteImage(urlString: url) {
+                // Guard: user may have navigated to a different equipment while we were fetching.
+                // Writing into the wrong slot would show equipment A's photo on equipment B's form.
+                guard !Task.isCancelled, selectedEquipment?.id == equipment.id else { return }
                 // Cache locally so future visits are instant
                 PhotoStorageService.shared.saveLocally(image: img, equipment: equipment, type: .equipment)
                 existingEquipPhoto = img
@@ -374,6 +390,7 @@ final class PlacardViewModel {
         }
         if iso, let url = equipment.isoPhotoUrl {
             if let img = await fetchRemoteImage(urlString: url) {
+                guard !Task.isCancelled, selectedEquipment?.id == equipment.id else { return }
                 PhotoStorageService.shared.saveLocally(image: img, equipment: equipment, type: .isolation)
                 existingIsoPhoto = img
                 disconnectPhoto  = img
@@ -392,6 +409,9 @@ final class PlacardViewModel {
         isLoadingSteps = true
         defer { isLoadingSteps = false }
         if let steps = try? await SupabaseService.shared.fetchEnergySteps(equipmentId: equipmentId) {
+            // Guard against a cancelled fetch (user navigated away) writing
+            // its results over the steps for the newly selected equipment.
+            guard !Task.isCancelled else { return }
             energySteps = steps
         }
     }
@@ -528,17 +548,16 @@ final class PlacardViewModel {
             var isoURL:   String?
             var pdfURL:   String?
 
-            // Use the in-session photo if available, otherwise fall back to locally cached
-            let equipImg = equipmentPhoto ?? existingEquipPhoto
-            let isoImg   = disconnectPhoto ?? existingIsoPhoto
-
-            if let img = equipImg, let data = img.compressedJPEG() {
+            // Only upload photos taken THIS session — don't re-upload existing remote photos.
+            // existingEquipPhoto/existingIsoPhoto are remote images already stored in Supabase;
+            // re-uploading them wastes bandwidth and creates duplicate storage objects.
+            if let img = equipmentPhoto, let data = img.compressedJPEG() {
                 uploadStep = "Uploading equipment photo…"
                 equipURL = try await SupabaseService.shared.uploadPhoto(
                     imageData: data, equipmentId: equipment.equipmentId, suffix: "EQUIP"
                 )
             }
-            if let img = isoImg, let data = img.compressedJPEG() {
+            if let img = disconnectPhoto, let data = img.compressedJPEG() {
                 uploadStep = "Uploading isolation photo…"
                 isoURL = try await SupabaseService.shared.uploadPhoto(
                     imageData: data, equipmentId: equipment.equipmentId, suffix: "ISO"
@@ -584,6 +603,7 @@ final class PlacardViewModel {
         }
     }
 
+    @MainActor
     private func queueForLater(equipment: Equipment) {
         let equipData = equipmentPhoto?.compressedJPEG()
         let isoData   = disconnectPhoto?.compressedJPEG()
@@ -598,6 +618,8 @@ final class PlacardViewModel {
     // MARK: - Reset
 
     func resetSession() {
+        energyStepTask?.cancel(); energyStepTask = nil
+        photoLoadTask?.cancel();  photoLoadTask  = nil
         selectedEquipment    = nil
         equipmentPhoto       = nil
         disconnectPhoto      = nil
@@ -606,6 +628,7 @@ final class PlacardViewModel {
         generatedPDFData     = nil
         pdfError             = nil
         uploadError          = nil
+        savedOffline         = false
         energySteps          = []
     }
 
