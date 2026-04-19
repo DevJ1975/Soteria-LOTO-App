@@ -161,6 +161,34 @@ final class SupabaseService {
         try validate(response, data)
     }
 
+    // MARK: - Update Energy Step (English)
+
+    /// Patches the English text columns of a single energy step row.
+    func updateEnergyStep(stepId: UUID,
+                           tagDescription: String?,
+                           isolationProcedure: String?,
+                           methodOfVerification: String?) async throws {
+        guard ConfigService.shared.isFullyConfigured else { throw SupabaseError.notConfigured }
+
+        let urlString = "\(base)/rest/v1/loto_energy_steps?id=eq.\(stepId.uuidString)"
+        guard let url = URL(string: urlString) else { throw SupabaseError.invalidURL }
+
+        var body: [String: Any] = [:]
+        if let t = tagDescription       { body["tag_description"]        = t }
+        if let i = isolationProcedure   { body["isolation_procedure"]    = i }
+        if let m = methodOfVerification { body["method_of_verification"] = m }
+        guard !body.isEmpty else { return }
+
+        var request        = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+        addHeaders(&request)
+        request.httpBody   = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data)
+    }
+
     // MARK: - Update Spanish Equipment Fields
 
     /// Patches the equipment row with Spanish notes and the reviewed flag.

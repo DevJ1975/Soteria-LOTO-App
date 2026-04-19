@@ -14,6 +14,8 @@ struct PlacardPreviewView: View {
     @Environment(PlacardViewModel.self) private var vm
     @Environment(\.dismiss) private var dismiss
 
+    @State private var showUploadError = false
+
     var body: some View {
         NavigationStack {
             Group {
@@ -29,6 +31,11 @@ struct PlacardPreviewView: View {
             .navigationTitle("Placard Preview")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { navToolbar }
+            .alert("Upload Failed", isPresented: $showUploadError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(vm.uploadError ?? "Upload failed. Photos saved locally and queued for your next manual sync.")
+            }
         }
     }
 
@@ -92,7 +99,9 @@ struct PlacardPreviewView: View {
             Button {
                 Task {
                     await vm.uploadPhotosAndSave()
-                    if vm.uploadError == nil {
+                    if vm.uploadError != nil {
+                        showUploadError = true
+                    } else {
                         UINotificationFeedbackGenerator().notificationOccurred(
                             vm.savedOffline ? .warning : .success
                         )

@@ -83,6 +83,15 @@ final class PlacardViewModel {
     // MARK: - Spanish Translation State
 
     var spanishSaveError: String? = nil
+    var stepEditError:    String? = nil
+
+    /// One pending English edit for a single energy step.
+    struct EnergyStepEdit {
+        let stepId: UUID
+        let tagDescription: String?
+        let isolationProcedure: String?
+        let methodOfVerification: String?
+    }
 
     /// One pending Spanish edit for a single energy step.
     struct SpanishStepEdit {
@@ -304,7 +313,7 @@ final class PlacardViewModel {
             UINotificationFeedbackGenerator().notificationOccurred(.success)
 
         } catch {
-            uploadError = "Photo upload failed — queued for retry when reconnected."
+            uploadError = "Photo upload failed. Saved locally — will retry when reconnected."
             // Queue so the offline service retries on reconnect
             let data = image.compressedJPEG()
             OfflineStorageService.shared.queue(
@@ -411,6 +420,36 @@ final class PlacardViewModel {
         }
     }
 
+    // MARK: - Save Energy Step Edits (English)
+
+    /// Saves English edits to energy steps in Supabase and updates the local cache.
+    @MainActor
+    func saveEnergyStepEdits(_ edits: [EnergyStepEdit]) async -> Bool {
+        stepEditError = nil
+        do {
+            for edit in edits {
+                try await SupabaseService.shared.updateEnergyStep(
+                    stepId:               edit.stepId,
+                    tagDescription:       edit.tagDescription,
+                    isolationProcedure:   edit.isolationProcedure,
+                    methodOfVerification: edit.methodOfVerification
+                )
+            }
+            for edit in edits {
+                if let idx = energySteps.firstIndex(where: { $0.id == edit.stepId }) {
+                    if let t = edit.tagDescription       { energySteps[idx].tagDescription       = t }
+                    if let i = edit.isolationProcedure   { energySteps[idx].isolationProcedure   = i }
+                    if let m = edit.methodOfVerification { energySteps[idx].methodOfVerification = m }
+                }
+            }
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            return true
+        } catch {
+            stepEditError = "Could not save step changes. Check your connection and try again."
+            return false
+        }
+    }
+
     // MARK: - Save Spanish Translations
 
     /// Saves Spanish translations to Supabase and updates the local cache.
@@ -459,7 +498,7 @@ final class PlacardViewModel {
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             return true
         } catch {
-            spanishSaveError = error.localizedDescription
+            spanishSaveError = "Could not save translations. Check your connection and try again."
             return false
         }
     }
@@ -541,7 +580,7 @@ final class PlacardViewModel {
         } catch {
             // Upload failed mid-flight — queue so nothing is lost
             queueForLater(equipment: equipment)
-            uploadError = "Upload failed — queued for next manual sync.\n\n\(error.localizedDescription)"
+            uploadError = "Upload failed. Photos saved locally and queued for your next manual sync."
         }
     }
 

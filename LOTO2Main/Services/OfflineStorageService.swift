@@ -110,6 +110,14 @@ final class OfflineStorageService {
         }
     }
 
+    // MARK: - Clear Entire Queue
+
+    /// Removes every pending upload and its associated files from disk.
+    func clearQueue() {
+        let snapshot = pendingUploads
+        for upload in snapshot { remove(id: upload.id) }
+    }
+
     // MARK: - Remove
 
     func remove(id: UUID) {

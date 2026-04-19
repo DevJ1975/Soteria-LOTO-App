@@ -36,6 +36,9 @@ struct PlacardFormView: View {
     // Spanish editing sheet
     @State private var showSpanishEdit   = false
 
+    // Energy step editing sheet
+    @State private var showStepEdit      = false
+
     // Upload feedback
     @State private var uploadSucceeded   = false
     @State private var showUploadError   = false
@@ -71,6 +74,9 @@ struct PlacardFormView: View {
             }
             .sheet(isPresented: $showSpanishEdit) {
                 SpanishEditSheet(equipment: equipment).environment(vm)
+            }
+            .sheet(isPresented: $showStepEdit) {
+                EnergyStepEditSheet().environment(vm)
             }
             .sheet(isPresented: $showEquipCamera) {
                 CameraPickerView { image in
@@ -629,8 +635,16 @@ struct PlacardFormView: View {
             .alert("Upload Failed", isPresented: $showUploadError) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text(vm.uploadError ?? "An unknown error occurred. The photos have been queued for your next upload attempt.")
+                Text(vm.uploadError ?? "Upload failed. Please try again.")
             }
+        }
+
+        // Edit energy steps button
+        ToolbarItem(placement: .topBarTrailing) {
+            Button { showStepEdit = true } label: {
+                Label("Edit Steps", systemImage: "square.and.pencil")
+            }
+            .disabled(vm.energySteps.isEmpty && !vm.isLoadingSteps)
         }
 
         // Spanish translation button
@@ -806,13 +820,13 @@ private struct SpanishEditSheet: View {
                     .disabled(isSaving)
                 }
             }
-            .alert("Error al guardar", isPresented: Binding(
+            .alert("Save Error", isPresented: Binding(
                 get: { saveError != nil },
                 set: { if !$0 { saveError = nil } }
             )) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text(saveError ?? "")
+                Text(saveError ?? "Could not save. Please try again.")
             }
         }
         .onAppear { populate() }
@@ -885,6 +899,142 @@ private struct SpanishEditSheet: View {
         )
 
         if ok { dismiss() } else { saveError = vm.spanishSaveError ?? "Error desconocido." }
+    }
+}
+
+// MARK: - EnergyStepEditSheet
+
+private struct EnergyStepEditSheet: View {
+
+    @Environment(PlacardViewModel.self) private var vm
+    @Environment(\.dismiss) private var dismiss
+
+    // Local draft state: stepId → (tag, isolation, verification)
+    @State private var drafts:     [UUID: StepDraft] = [:]
+    @State private var isSaving:   Bool   = false
+    @State private var saveError:  String? = nil
+
+    private struct StepDraft {
+        var tagDescription: String = ""
+        var isolationProcedure: String = ""
+        var methodOfVerification: String = ""
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                ForEach(vm.energySteps) { step in
+                    let ec = EnergyCode.forType(step.energyType)
+                    Section {
+                        stepField("Energy Tag & Description",
+                                  binding: tagBinding(step.id),
+                                  placeholder: "(empty)")
+                        stepField("Isolation Procedure & Lockout Devices",
+                                  binding: isoBinding(step.id),
+                                  placeholder: "(empty)")
+                        stepField("Method of Verification",
+                                  binding: verBinding(step.id),
+                                  placeholder: "(empty)")
+                    } header: {
+                        HStack(spacing: 6) {
+                            Text(step.energyType)
+                                .font(.caption.bold())
+                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .background(ec?.color ?? Color.secondary,
+                                            in: RoundedRectangle(cornerRadius: 4))
+                                .foregroundStyle(.white)
+                            Text("Step \(step.stepNumber)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Edit Energy Steps")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Task { await save() }
+                    } label: {
+                        if isSaving { ProgressView().scaleEffect(0.8) }
+                        else        { Text("Save").bold() }
+                    }
+                    .disabled(isSaving)
+                }
+            }
+            .alert("Save Failed", isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(saveError ?? "Could not save. Please try again.")
+            }
+        }
+        .onAppear { populate() }
+    }
+
+    // MARK: - Step field
+
+    @ViewBuilder
+    private func stepField(_ label: String, binding: Binding<String>, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            TextField(placeholder, text: binding, axis: .vertical)
+                .lineLimit(2...)
+                .font(.subheadline)
+        }
+        .padding(.vertical, 2)
+    }
+
+    // MARK: - Bindings
+
+    private func tagBinding(_ id: UUID) -> Binding<String> {
+        Binding(get: { drafts[id]?.tagDescription ?? "" },
+                set: { drafts[id, default: StepDraft()].tagDescription = $0 })
+    }
+    private func isoBinding(_ id: UUID) -> Binding<String> {
+        Binding(get: { drafts[id]?.isolationProcedure ?? "" },
+                set: { drafts[id, default: StepDraft()].isolationProcedure = $0 })
+    }
+    private func verBinding(_ id: UUID) -> Binding<String> {
+        Binding(get: { drafts[id]?.methodOfVerification ?? "" },
+                set: { drafts[id, default: StepDraft()].methodOfVerification = $0 })
+    }
+
+    // MARK: - Populate
+
+    private func populate() {
+        for step in vm.energySteps {
+            drafts[step.id] = StepDraft(
+                tagDescription:       step.tagDescription       ?? "",
+                isolationProcedure:   step.isolationProcedure   ?? "",
+                methodOfVerification: step.methodOfVerification ?? ""
+            )
+        }
+    }
+
+    // MARK: - Save
+
+    private func save() async {
+        isSaving = true
+        defer { isSaving = false }
+
+        let edits = vm.energySteps.map { step in
+            let d = drafts[step.id]
+            return PlacardViewModel.EnergyStepEdit(
+                stepId:               step.id,
+                tagDescription:       d?.tagDescription.nonEmpty,
+                isolationProcedure:   d?.isolationProcedure.nonEmpty,
+                methodOfVerification: d?.methodOfVerification.nonEmpty
+            )
+        }
+
+        let ok = await vm.saveEnergyStepEdits(edits)
+        if ok { dismiss() } else { saveError = vm.stepEditError ?? "Unknown error." }
     }
 }
 

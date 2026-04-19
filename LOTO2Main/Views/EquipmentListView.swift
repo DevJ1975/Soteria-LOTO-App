@@ -64,14 +64,17 @@ struct EquipmentListView: View {
 
     private var offlineBanner: some View {
         HStack(spacing: 8) {
-            Image(systemName: network.isConnected ? "arrow.triangle.2.circlepath" : "wifi.slash")
+            Image(systemName: network.isConnected ? "icloud.and.arrow.up" : "wifi.slash")
                 .font(.caption.bold())
 
             if !network.isConnected {
-                Text("Offline — photos will sync when connected")
+                Text("Offline — photos will queue until reconnected")
+                    .font(.caption.bold())
+            } else if offline.isFlushing {
+                Text("Syncing \(offline.pendingCount) queued upload\(offline.pendingCount == 1 ? "" : "s")…")
                     .font(.caption.bold())
             } else {
-                Text("Syncing \(offline.pendingCount) pending upload\(offline.pendingCount == 1 ? "" : "s")…")
+                Text("\(offline.pendingCount) upload\(offline.pendingCount == 1 ? "" : "s") queued")
                     .font(.caption.bold())
             }
 
@@ -86,6 +89,14 @@ struct EquipmentListView: View {
                 .font(.caption.bold())
                 .buttonStyle(.plain)
                 .underline()
+
+                Button("Clear") {
+                    OfflineStorageService.shared.clearQueue()
+                }
+                .font(.caption.bold())
+                .buttonStyle(.plain)
+                .underline()
+                .opacity(0.75)
             }
         }
         .padding(.horizontal, 14)

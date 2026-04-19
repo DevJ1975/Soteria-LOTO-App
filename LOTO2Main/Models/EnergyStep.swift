@@ -13,9 +13,9 @@ struct EnergyStep: Codable, Identifiable {
     let equipmentId: String       // FK → loto_equipment.equipment_id
     let energyType: String        // "E", "H", "P", "M", "G", "N", "O", "OG"
     let stepNumber: Int           // 1, 2, 3… for equipment with multiple sources of the same type
-    let tagDescription: String?
-    let isolationProcedure: String?
-    let methodOfVerification: String?
+    var tagDescription: String?
+    var isolationProcedure: String?
+    var methodOfVerification: String?
 
     // Spanish translations — updated via SupabaseService.updateEnergyStepSpanish()
     var tagDescriptionEs: String?
