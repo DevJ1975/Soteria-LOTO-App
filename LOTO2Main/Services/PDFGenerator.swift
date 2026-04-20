@@ -69,7 +69,10 @@ El propósito de este procedimiento es establecer los requisitos obligatorios pa
     func generate(equipment: Equipment,
                   equipmentPhoto: UIImage?,
                   disconnectPhoto: UIImage?,
-                  energySteps: [EnergyStep] = []) -> Data {
+                  energySteps: [EnergyStep] = [],
+                  supervisorName: String? = nil,
+                  signOffDate: Date? = nil,
+                  signatureImage: UIImage? = nil) -> Data {
         let pageRect = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
         let format   = UIGraphicsImageRendererFormat.default()
         format.scale  = 2
@@ -81,12 +84,16 @@ El propósito de este procedimiento es establecer los requisitos obligatorios pa
         let enImage = UIGraphicsImageRenderer(size: pageRect.size, format: format).image { _ in
             self.drawPlacard(equipment: equipment, equipmentPhoto: equip,
                              disconnectPhoto: disco, energySteps: energySteps,
-                             language: .english, pageRect: pageRect)
+                             language: .english, pageRect: pageRect,
+                             supervisorName: supervisorName, signOffDate: signOffDate,
+                             signatureImage: signatureImage)
         }
         let esImage = UIGraphicsImageRenderer(size: pageRect.size, format: format).image { _ in
             self.drawPlacard(equipment: equipment, equipmentPhoto: equip,
                              disconnectPhoto: disco, energySteps: energySteps,
-                             language: .spanish, pageRect: pageRect)
+                             language: .spanish, pageRect: pageRect,
+                             supervisorName: supervisorName, signOffDate: signOffDate,
+                             signatureImage: signatureImage)
         }
 
         let pdfRenderer = UIGraphicsPDFRenderer(bounds: pageRect)
@@ -103,7 +110,10 @@ El propósito de este procedimiento es establecer los requisitos obligatorios pa
                               disconnectPhoto: UIImage?,
                               energySteps: [EnergyStep],
                               language: Language,
-                              pageRect: CGRect) {
+                              pageRect: CGRect,
+                              supervisorName: String? = nil,
+                              signOffDate: Date? = nil,
+                              signatureImage: UIImage? = nil) {
         UIColor.white.setFill()
         UIRectFill(pageRect)
 
@@ -120,7 +130,10 @@ El propósito de este procedimiento es establecer los requisitos obligatorios pa
                           energySteps: energySteps,
                           language: language,
                           pageRect: pageRect,
-                          y: y)
+                          y: y,
+                          supervisorName: supervisorName,
+                          signOffDate: signOffDate,
+                          signatureImage: signatureImage)
 
         drawLanguageTag(language, pageRect)
 
@@ -160,13 +173,23 @@ El propósito de este procedimiento es establecer los requisitos obligatorios pa
         title.draw(at: CGPoint(x: (page.width - ts.width) / 2, y: y + (h - ts.height) / 2),
                    withAttributes: titleAttr)
 
+        let version   = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let verLabel  = "v\(version)"
         let dateLabel = language == .english ? "Created: \(formattedDate())"
                                              : "Creado: \(formattedDate())"
-        let dateAttr: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: 8), .foregroundColor: UIColor.black
+        let verAttr: [NSAttributedString.Key: Any] = [
+            .font: UIFont.boldSystemFont(ofSize: 7), .foregroundColor: UIColor.black
         ]
+        let dateAttr: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 7), .foregroundColor: UIColor.black
+        ]
+        let vts = verLabel.size(withAttributes: verAttr)
         let dts = dateLabel.size(withAttributes: dateAttr)
-        dateLabel.draw(at: CGPoint(x: page.width - dts.width - 8, y: y + (h - dts.height) / 2),
+        let blockH = vts.height + 2 + dts.height
+        let blockY = y + (h - blockH) / 2
+        verLabel.draw(at: CGPoint(x: page.width - vts.width - 8, y: blockY),
+                      withAttributes: verAttr)
+        dateLabel.draw(at: CGPoint(x: page.width - dts.width - 8, y: blockY + vts.height + 2),
                        withAttributes: dateAttr)
 
         return y + h
@@ -344,8 +367,12 @@ El propósito de este procedimiento es establecer los requisitos obligatorios pa
                                     energySteps: [EnergyStep],
                                     language: Language,
                                     pageRect: CGRect,
-                                    y: CGFloat) {
-        let remaining  = pageRect.height - y - 18
+                                    y: CGFloat,
+                                    supervisorName: String? = nil,
+                                    signOffDate: Date? = nil,
+                                    signatureImage: UIImage? = nil) {
+        let barH: CGFloat = signatureImage != nil ? 28 : 18
+        let remaining  = pageRect.height - y - barH
         let photoRowH: CGFloat = 110
         let halfW      = pageRect.width / 2
 
@@ -364,7 +391,9 @@ El propósito de este procedimiento es establecer los requisitos obligatorios pa
                         x: 0, y: tableY, width: pageRect.width,
                         height: remaining - photoRowH)
 
-        drawSignatureBar(language: language, pageRect: pageRect, y: pageRect.height - 18)
+        drawSignatureBar(language: language, pageRect: pageRect, y: pageRect.height - barH,
+                         supervisorName: supervisorName, signOffDate: signOffDate,
+                         department: equipment.department, signatureImage: signatureImage)
     }
 
     // MARK: - Photo Slot
@@ -519,10 +548,22 @@ El propósito de este procedimiento es establecer los requisitos obligatorios pa
 
     // MARK: - Signature Bar
 
-    private func drawSignatureBar(language: Language, pageRect: CGRect, y: CGFloat) {
-        let h: CGFloat = 18
-        UIColor(white: 0.97, alpha: 1).setFill()
+    private func drawSignatureBar(language: Language, pageRect: CGRect, y: CGFloat,
+                                   supervisorName: String? = nil,
+                                   signOffDate: Date? = nil,
+                                   department: String = "",
+                                   signatureImage: UIImage? = nil) {
+        // Bar is taller when a drawn signature image is present
+        let h: CGFloat = signatureImage != nil ? 28 : 18
+        let isSigned = supervisorName != nil
+
+        // Background — green tint when signed
+        UIColor(white: isSigned ? 0.93 : 0.97, alpha: 1).setFill()
         UIRectFill(CGRect(x: 0, y: y, width: pageRect.width, height: h))
+        if isSigned {
+            UIColor(red: 0.2, green: 0.65, blue: 0.35, alpha: 0.25).setFill()
+            UIRectFill(CGRect(x: 0, y: y, width: pageRect.width, height: h))
+        }
         UIColor.black.setStroke()
         let border = UIBezierPath(rect: CGRect(x: 0, y: y, width: pageRect.width, height: h))
         border.lineWidth = 0.5; border.stroke()
@@ -530,15 +571,61 @@ El propósito de este procedimiento es establecer los requisitos obligatorios pa
         let attr: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: 6), .foregroundColor: UIColor.black
         ]
-        let labels = language == .english
-            ? ["Signature: _______________", "Date: _______________",
-               "Dept: _______________", "See PM Store in PT Folder"]
-            : ["Firma: _______________", "Fecha: _______________",
-               "Depto: _______________", "Ver PM Store en carpeta PT"]
-        let cw = pageRect.width / CGFloat(labels.count)
-        for (i, l) in labels.enumerated() {
-            l.draw(in: CGRect(x: CGFloat(i) * cw + 4, y: y + 4, width: cw - 8, height: h - 4),
-                   withAttributes: attr)
+        let boldAttr: [NSAttributedString.Key: Any] = [
+            .font: UIFont.boldSystemFont(ofSize: 6), .foregroundColor: UIColor.black
+        ]
+        let tinyAttr: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 5.5), .foregroundColor: UIColor.darkGray
+        ]
+
+        let formattedSignDate = signOffDate.map { Self.dateFormatter.string(from: $0) }
+        let cw = pageRect.width / 4   // four equal columns
+
+        // ── Column 1: drawn signature image or supervisor name text ──
+        if let img = signatureImage {
+            // Tiny "SIGNATURE:" / "FIRMA:" label above the image
+            let lbl = language == .english ? "SIGNATURE:" : "FIRMA:"
+            lbl.draw(in: CGRect(x: 4, y: y + 2, width: cw - 8, height: 8), withAttributes: tinyAttr)
+            // Scale the drawn signature image to fit the remaining height, preserving aspect ratio
+            let imgArea = CGRect(x: 4, y: y + 10, width: cw - 8, height: h - 12)
+            let s  = min(imgArea.width / img.size.width, imgArea.height / img.size.height)
+            let dw = img.size.width * s; let dh = img.size.height * s
+            img.draw(in: CGRect(x: imgArea.midX - dw / 2, y: imgArea.midY - dh / 2,
+                                width: dw, height: dh))
+        } else {
+            // Text-only: supervisor name or placeholder
+            let sigText = supervisorName.map {
+                language == .english ? "Signature: \($0)" : "Firma: \($0)"
+            } ?? (language == .english ? "Signature: _______________" : "Firma: _______________")
+            sigText.draw(in: CGRect(x: 4, y: y + 4, width: cw - 8, height: h - 4),
+                         withAttributes: isSigned ? boldAttr : attr)
+        }
+
+        // ── Columns 2–4: Date, Dept, Reference ──
+        let dateText = formattedSignDate.map {
+            language == .english ? "Date: \($0)" : "Fecha: \($0)"
+        } ?? (language == .english ? "Date: _______________" : "Fecha: _______________")
+
+        let deptText = department.isEmpty
+            ? (language == .english ? "Dept: _______________" : "Depto: _______________")
+            : (language == .english ? "Dept: \(department)" : "Depto: \(department)")
+
+        let refText = language == .english ? "See PM Store in PT Folder" : "Ver PM Store en carpeta PT"
+
+        for (i, l) in [dateText, deptText, refText].enumerated() {
+            let x = CGFloat(i + 1) * cw
+            let isFilledIn = isSigned && i < 2   // Date and Dept are filled in when signed
+            l.draw(in: CGRect(x: x + 4, y: y + 4, width: cw - 8, height: h - 4),
+                   withAttributes: isFilledIn ? boldAttr : attr)
+        }
+
+        // Subtle column dividers
+        UIColor(white: 0.7, alpha: 1).setStroke()
+        for col in 1...3 {
+            let cx = CGFloat(col) * cw
+            let line = UIBezierPath(); line.lineWidth = 0.25
+            line.move(to: CGPoint(x: cx, y: y)); line.addLine(to: CGPoint(x: cx, y: y + h))
+            line.stroke()
         }
     }
 

@@ -35,6 +35,42 @@ final class PlacardViewModel {
     var departments:     [String]    = []
     var loadState:       LoadState   = .idle
 
+    // MARK: - Department Sign-offs (persisted locally across sessions)
+
+    struct DepartmentSignOff: Codable {
+        let supervisorName: String
+        let date: Date
+        let signatureData: Data?   // JPEG-compressed drawn signature; nil = text-only sign-off
+    }
+
+    private static let signOffKey = "loto.department_signoffs"
+    private(set) var departmentSignOffs: [String: DepartmentSignOff] = [:]
+
+    func signOff(department: String, supervisorName: String, date: Date,
+                 signatureImage: UIImage? = nil) {
+        let sigData = signatureImage?.jpegData(compressionQuality: 0.8)
+        departmentSignOffs[department] = DepartmentSignOff(
+            supervisorName: supervisorName, date: date, signatureData: sigData
+        )
+        if let data = try? JSONEncoder().encode(departmentSignOffs) {
+            UserDefaults.standard.set(data, forKey: Self.signOffKey)
+        }
+    }
+
+    func clearSignOff(department: String) {
+        departmentSignOffs.removeValue(forKey: department)
+        if let data = try? JSONEncoder().encode(departmentSignOffs) {
+            UserDefaults.standard.set(data, forKey: Self.signOffKey)
+        }
+    }
+
+    private func loadSignOffs() {
+        guard let data    = UserDefaults.standard.data(forKey: Self.signOffKey),
+              let decoded = try? JSONDecoder().decode([String: DepartmentSignOff].self, from: data)
+        else { return }
+        departmentSignOffs = decoded
+    }
+
     // MARK: - Decommissioned Equipment (persisted locally across sessions)
 
     private static let deprecatedKey = "loto.decommissioned_ids"
@@ -49,10 +85,78 @@ final class PlacardViewModel {
         }
         UserDefaults.standard.set(Array(decommissionedIDs), forKey: Self.deprecatedKey)
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        // allEquipment hasn't changed, so didSet won't fire — trigger explicitly so
+        // countActive, countComplete, and per-dept stats all reflect the new state.
+        rebuildGroupedCache()
     }
 
     func isDecommissioned(_ equipment: Equipment) -> Bool {
         decommissionedIDs.contains(equipment.equipmentId)
+    }
+
+    /// Serialises the full equipment list to a CSV file and returns its URL for sharing.
+    /// Includes all items (active + decommissioned) so the export is a complete inventory.
+    func exportEquipmentCSV() -> URL {
+        var lines: [String] = [
+            "equipment_id,description,department,prefix,photo_status," +
+            "has_equip_photo,has_iso_photo,needs_equip_photo,needs_iso_photo," +
+            "verified,verified_by,verified_date,decommissioned,notes"
+        ]
+        for eq in allEquipment.sorted(by: { $0.equipmentId < $1.equipmentId }) {
+            let row: [String] = [
+                csvEscape(eq.equipmentId),
+                csvEscape(eq.description),
+                csvEscape(eq.department),
+                csvEscape(eq.prefix),
+                eq.photoStatus,
+                eq.hasEquipPhoto  ? "true" : "false",
+                eq.hasIsoPhoto    ? "true" : "false",
+                eq.needsEquipPhoto ? "true" : "false",
+                eq.needsIsoPhoto   ? "true" : "false",
+                eq.verified        ? "true" : "false",
+                csvEscape(eq.verifiedBy   ?? ""),
+                csvEscape(eq.verifiedDate ?? ""),
+                decommissionedIDs.contains(eq.equipmentId) ? "true" : "false",
+                csvEscape(eq.notes ?? "")
+            ]
+            lines.append(row.joined(separator: ","))
+        }
+        let csv = lines.joined(separator: "\n")
+        let f   = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+        let name = "LOTO_Equipment_Export_\(f.string(from: Date())).csv"
+        let url  = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        try? csv.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    private func csvEscape(_ value: String) -> String {
+        if value.contains(",") || value.contains("\"") || value.contains("\n") {
+            return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+        }
+        return value
+    }
+
+    /// Renames every equipment row in `oldName` to `newName` — both in Supabase
+    /// and in the local cache — then rebuilds stats so the sidebar updates instantly.
+    func renameDepartment(from oldName: String, to newName: String) async throws {
+        try await SupabaseService.shared.renameDepartment(from: oldName, to: newName)
+        // Update local cache so the sidebar reflects the change without a full reload.
+        allEquipment = allEquipment.map { eq in
+            guard eq.department == oldName else { return eq }
+            let updated = eq
+            // Equipment is a struct; re-encode/decode to get a copy with the new dept.
+            // Since Equipment has no memberwise init exposed, we recreate via JSON round-trip.
+            if let data    = try? JSONEncoder().encode(updated),
+               var dict    = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                dict["department"] = newName
+                if let patched = try? JSONSerialization.data(withJSONObject: dict),
+                   let result  = try? JSONDecoder().decode(Equipment.self, from: patched) {
+                    return result
+                }
+            }
+            return updated
+        }
+        rebuildGroupedCache()
     }
 
     // MARK: - Init (load cache immediately so list appears before network responds)
@@ -61,9 +165,11 @@ final class PlacardViewModel {
         decommissionedIDs = Set(
             UserDefaults.standard.stringArray(forKey: Self.deprecatedKey) ?? []
         )
+        loadSignOffs()
         if let cached = Self.loadCache() {
-            allEquipment = cached
-            departments  = Array(Set(cached.map { $0.department })).sorted()
+            let reconciled = reconcileLocalPhotos(cached)
+            allEquipment = reconciled
+            departments  = Array(Set(reconciled.map { $0.department })).sorted()
             loadState    = .loaded
         }
     }
@@ -139,11 +245,19 @@ final class PlacardViewModel {
     private var energyStepTask: Task<Void, Never>?
     private var photoLoadTask:  Task<Void, Never>?
 
-    // MARK: - Stats (cached)
+    // MARK: - Stats (cached, active equipment only — excludes decommissioned)
 
+    private(set) var countActive   = 0   // non-decommissioned total
     private(set) var countComplete = 0
     private(set) var countPartial  = 0
     private(set) var countMissing  = 0
+
+    // Per-department active stats — O(1) lookup for sidebar rows instead of O(n) filter per render
+    private(set) var deptActiveCounts:   [String: Int] = [:]
+    private(set) var deptCompleteCounts: [String: Int] = [:]
+
+    // Cancels any in-flight rebuild when a new one starts (prevents stale-stats race)
+    private var rebuildTask: Task<Void, Never>?
 
     // MARK: - Load
 
@@ -154,11 +268,15 @@ final class PlacardViewModel {
         let hadCache = loadState == .loaded
         if !hadCache { loadState = .loading }
         do {
-            let equipment = try await SupabaseService.shared.fetchAllEquipment()
-            allEquipment  = equipment
-            departments   = Array(Set(equipment.map { $0.department })).sorted()
-            loadState     = .loaded
-            Self.saveCache(equipment)
+            let equipment  = try await SupabaseService.shared.fetchAllEquipment()
+            let reconciled = reconcileLocalPhotos(equipment)
+            allEquipment   = reconciled
+            departments    = Array(Set(reconciled.map { $0.department })).sorted()
+            loadState      = .loaded
+            Self.saveCache(reconciled)
+            // Silently push any photos saved locally but not yet in Supabase.
+            // Runs after every successful load (launch + reconnect).
+            Task { await scanAndUploadMissingPhotos() }
         } catch {
             if !hadCache { loadState = .error(error.localizedDescription) }
         }
@@ -212,21 +330,27 @@ final class PlacardViewModel {
         return navigationList[idx + 1]
     }
 
-    // MARK: - Background WiFi Photo Sync (#4)
+    // MARK: - Background WiFi Photo Sync
 
-    /// Scans local photo storage for any photos that were saved offline but not yet uploaded.
-    /// Uploads them silently in the background. Only runs when connected.
+    private var isScanningPhotos = false
+
+    /// Scans local photo storage for any photos saved on-device but not yet uploaded to Supabase.
+    /// Uses the Supabase URL (nil = never uploaded) rather than the boolean flag, because
+    /// reconcileLocalPhotos() may have already set hasEquipPhoto/hasIsoPhoto = true in memory
+    /// while the remote URL is still absent. Runs silently; only active when connected.
     @MainActor
     func scanAndUploadMissingPhotos() async {
-        guard NetworkMonitor.shared.isConnected else { return }
-        let candidates = allEquipment.filter { !$0.hasEquipPhoto || !$0.hasIsoPhoto }
-        for item in candidates {
+        guard NetworkMonitor.shared.isConnected, !isScanningPhotos else { return }
+        isScanningPhotos = true
+        defer { isScanningPhotos = false }
+
+        for item in allEquipment where !decommissionedIDs.contains(item.equipmentId) {
             guard NetworkMonitor.shared.isConnected else { break }
-            if !item.hasEquipPhoto,
+            if item.equipPhotoUrl == nil,
                let img = PhotoStorageService.shared.loadLocal(equipment: item, type: .equipment) {
                 await uploadPhoto(image: img, equipment: item, type: .equipment)
             }
-            if !item.hasIsoPhoto,
+            if item.isoPhotoUrl == nil,
                let img = PhotoStorageService.shared.loadLocal(equipment: item, type: .isolation) {
                 await uploadPhoto(image: img, equipment: item, type: .isolation)
             }
@@ -269,9 +393,11 @@ final class PlacardViewModel {
             case .equipment: updated.hasEquipPhoto = true
             case .isolation: updated.hasIsoPhoto   = true
             }
-            updated.photoStatus = updated.hasEquipPhoto && updated.hasIsoPhoto ? "complete"
-                                 : (updated.hasEquipPhoto || updated.hasIsoPhoto) ? "partial"
-                                 : "missing"
+            updated.photoStatus = computePhotoStatus(
+                for: updated,
+                willHaveEquip: updated.hasEquipPhoto,
+                willHaveIso:   updated.hasIsoPhoto
+            )
             allEquipment[idx] = updated   // triggers rebuildGroupedCache() via didSet
         }
         // Upload is manual — tap the Upload button in the toolbar when ready.
@@ -292,14 +418,20 @@ final class PlacardViewModel {
             return
         }
 
-        switch type {
-        case .equipment: isUploadingEquipPhoto = true
-        case .isolation: isUploadingIsoPhoto   = true
+        // Only show the per-slot spinner when the user is viewing this equipment.
+        // Background scans may upload items the user has already navigated away from.
+        if selectedEquipment?.equipmentId == equipment.equipmentId {
+            switch type {
+            case .equipment: isUploadingEquipPhoto = true
+            case .isolation: isUploadingIsoPhoto   = true
+            }
         }
         defer {
-            switch type {
-            case .equipment: isUploadingEquipPhoto = false
-            case .isolation: isUploadingIsoPhoto   = false
+            if selectedEquipment?.equipmentId == equipment.equipmentId {
+                switch type {
+                case .equipment: isUploadingEquipPhoto = false
+                case .isolation: isUploadingIsoPhoto   = false
+                }
             }
         }
 
@@ -316,7 +448,9 @@ final class PlacardViewModel {
             let currentItem = allEquipment.first { $0.equipmentId == equipment.equipmentId }
             let willHaveEquip = type == .equipment || (currentItem?.hasEquipPhoto ?? false)
             let willHaveIso   = type == .isolation  || (currentItem?.hasIsoPhoto  ?? false)
-            let newStatus     = (willHaveEquip && willHaveIso) ? "complete" : "partial"
+            let newStatus     = computePhotoStatus(for: equipment,
+                                                   willHaveEquip: willHaveEquip,
+                                                   willHaveIso:   willHaveIso)
 
             // Patch Supabase row — URLs + status + boolean flags in one call
             try await SupabaseService.shared.updatePhotoURLs(
@@ -343,17 +477,21 @@ final class PlacardViewModel {
                 allEquipment[idx] = updated   // triggers rebuildGroupedCache() via didSet
             }
 
-            // Mark upload complete for UI badge
-            switch type {
-            case .equipment: equipPhotoUploaded = true
-            case .isolation: isoPhotoUploaded   = true
+            // Mark upload complete for UI badge only if the user is still viewing
+            // this equipment — background scans upload items the user may have left.
+            if selectedEquipment?.equipmentId == equipment.equipmentId {
+                switch type {
+                case .equipment: equipPhotoUploaded = true
+                case .isolation: isoPhotoUploaded   = true
+                }
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
             }
 
-            // Haptic feedback on success
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-
         } catch {
-            uploadError = "Photo upload failed. Saved locally — will retry when reconnected."
+            // Only surface an error banner when the user is actively viewing this equipment.
+            if selectedEquipment?.equipmentId == equipment.equipmentId {
+                uploadError = "Photo upload failed. Saved locally — will retry when reconnected."
+            }
             // Queue so the offline service retries on reconnect
             let data = image.compressedJPEG()
             OfflineStorageService.shared.queue(
@@ -457,15 +595,22 @@ final class PlacardViewModel {
         guard let equipment = selectedEquipment else { return }
         await MainActor.run { isGeneratingPDF = true; pdfError = nil }
 
-        let photo1 = equipmentPhoto ?? existingEquipPhoto
-        let photo2 = disconnectPhoto ?? existingIsoPhoto
-        let steps  = energySteps
+        let photo1   = equipmentPhoto ?? existingEquipPhoto
+        let photo2   = disconnectPhoto ?? existingIsoPhoto
+        let steps    = energySteps
+        let signOff  = departmentSignOffs[equipment.department]
+        let supName  = signOff?.supervisorName
+        let soDate   = signOff?.date
+        let sigImg   = signOff?.signatureData.flatMap { UIImage(data: $0) }
         let pdfData = await Task.detached(priority: .userInitiated) {
             await PDFGenerator.shared.generate(
                 equipment: equipment,
                 equipmentPhoto: photo1,
                 disconnectPhoto: photo2,
-                energySteps: steps
+                energySteps: steps,
+                supervisorName: supName,
+                signOffDate: soDate,
+                signatureImage: sigImg
             )
         }.value
 
@@ -608,8 +753,9 @@ final class PlacardViewModel {
             uploadStep = "Saving to database…"
             let willHaveEquip = equipURL != nil || equipment.hasEquipPhoto
             let willHaveIso   = isoURL   != nil || equipment.hasIsoPhoto
-            let newStatus     = willHaveEquip && willHaveIso ? "complete"
-                              : (willHaveEquip || willHaveIso) ? "partial" : "missing"
+            let newStatus     = computePhotoStatus(for: equipment,
+                                                   willHaveEquip: willHaveEquip,
+                                                   willHaveIso:   willHaveIso)
 
             try await SupabaseService.shared.updatePhotoURLs(
                 equipmentId:   equipment.equipmentId,
@@ -666,6 +812,7 @@ final class PlacardViewModel {
     func resetSession() {
         energyStepTask?.cancel(); energyStepTask = nil
         photoLoadTask?.cancel();  photoLoadTask  = nil
+        rebuildTask?.cancel();    rebuildTask    = nil
         selectedEquipment    = nil
         equipmentPhoto       = nil
         disconnectPhoto      = nil
@@ -677,6 +824,44 @@ final class PlacardViewModel {
         savedOffline         = false
         lowStorageWarning    = false
         energySteps          = []
+    }
+
+    // MARK: - Private: Photo Status Computation
+
+    /// Single source of truth for photo_status, used by photoTaken(), uploadPhotosAndSave(),
+    /// and uploadPhoto(). Respects needsEquipPhoto / needsIsoPhoto flags so equipment that
+    /// only requires ONE photo type is correctly marked "complete" (not "partial") once
+    /// that single photo is present.
+    private func computePhotoStatus(for equipment: Equipment,
+                                    willHaveEquip: Bool,
+                                    willHaveIso:   Bool) -> String {
+        let equipOK = !equipment.needsEquipPhoto || willHaveEquip
+        let isoOK   = !equipment.needsIsoPhoto   || willHaveIso
+        if equipOK && isoOK             { return "complete" }
+        if willHaveEquip || willHaveIso { return "partial"  }
+        return "missing"
+    }
+
+    // MARK: - Private: Local Photo Reconciliation
+
+    /// If a photo was saved locally but Supabase still reports it as absent
+    /// (e.g., the upload failed after the local write), update the in-memory
+    /// Equipment flags so the list shows the correct status instead of "missing".
+    private func reconcileLocalPhotos(_ items: [Equipment]) -> [Equipment] {
+        items.map { item in
+            var e = item
+            let localEquip = PhotoStorageService.shared.hasLocal(equipment: e, type: .equipment)
+            let localIso   = PhotoStorageService.shared.hasLocal(equipment: e, type: .isolation)
+            guard (!e.hasEquipPhoto && localEquip) || (!e.hasIsoPhoto && localIso) else { return e }
+            if localEquip { e.hasEquipPhoto = true }
+            if localIso   { e.hasIsoPhoto   = true }
+            // Respect needsEquipPhoto / needsIsoPhoto so items that only need ONE
+            // photo type are marked "complete" rather than "partial".
+            let equipSatisfied = !e.needsEquipPhoto || e.hasEquipPhoto
+            let isoSatisfied   = !e.needsIsoPhoto   || e.hasIsoPhoto
+            e.photoStatus = (equipSatisfied && isoSatisfied) ? "complete" : "partial"
+            return e
+        }
     }
 
     // MARK: - Private: Disk Cache
@@ -703,26 +888,62 @@ final class PlacardViewModel {
     // MARK: - Private: Cache Rebuild
 
     private func rebuildGroupedCache() {
-        // Compute on background thread, publish on main
-        let items = allEquipment
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
+        // Cancel any in-flight rebuild so a rapid decommission + restore doesn't
+        // leave stale stats if the earlier task finishes after the later one.
+        rebuildTask?.cancel()
+
+        // Capture value types before crossing the actor boundary.
+        let items   = allEquipment
+        let retired = decommissionedIDs
+
+        rebuildTask = Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+
+            // Active = everything that hasn't been decommissioned.
+            // Group ALL items so the equipment list's "show decommissioned" toggle works.
+            let active = items.filter { !retired.contains($0.equipmentId) }
+
             var map: [String: [Equipment]] = [:]
             for eq in items { map[eq.department, default: []].append(eq) }
             let groups = map
                 .map { (department: $0.key, items: $0.value.sorted { $0.equipmentId < $1.equipmentId }) }
                 .sorted { $0.department < $1.department }
-            let complete = items.filter { $0.photoStatus == "complete" }.count
-            let partial  = items.filter { $0.photoStatus == "partial"  }.count
-            let missing  = items.filter { $0.photoStatus == "missing"  }.count
 
+            // Global stats — active items only
+            var complete = 0, partial = 0, missing = 0
+            // Per-department active stats — sidebar rows read these for O(1) lookup
+            var deptActive:   [String: Int] = [:]
+            var deptComplete: [String: Int] = [:]
+            for eq in active {
+                deptActive[eq.department, default: 0] += 1
+                switch eq.photoStatus {
+                case "complete":
+                    complete += 1
+                    deptComplete[eq.department, default: 0] += 1
+                case "partial":  partial += 1
+                default:         missing += 1
+                }
+            }
+
+            // Freeze mutable accumulators as immutable constants before crossing
+            // into MainActor.run (@Sendable closure) — required for Swift 6 correctness.
+            let snapComplete     = complete
+            let snapPartial      = partial
+            let snapMissing      = missing
+            let snapDeptActive   = deptActive
+            let snapDeptComplete = deptComplete
+
+            guard !Task.isCancelled else { return }
             await MainActor.run {
-                self.groupedEquipment = groups
-                self.filteredGroups   = groups
-                self.filteredEquipment = items
-                self.countComplete    = complete
-                self.countPartial     = partial
-                self.countMissing     = missing
+                self.groupedEquipment    = groups
+                self.filteredGroups      = groups
+                self.filteredEquipment   = items
+                self.countActive         = active.count
+                self.countComplete       = snapComplete
+                self.countPartial        = snapPartial
+                self.countMissing        = snapMissing
+                self.deptActiveCounts    = snapDeptActive
+                self.deptCompleteCounts  = snapDeptComplete
             }
         }
     }

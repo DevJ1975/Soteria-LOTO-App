@@ -1,0 +1,7 @@
+equipment_id,description,department,prefix,needs_equip_photo,needs_iso_photo,notes
+321-MX-01,Main Disconnect Switch,Maintenance,321,true,true,
+321-MX-02,Motor Control Center,Maintenance,321,true,true,
+321-PNL-01,Panel Board A,Maintenance,321,true,false,Electrical panel only
+450-PMP-01,Feed Pump Motor,Operations,450,true,true,
+450-PMP-02,Circulation Pump,Operations,450,true,true,
+450-VLV-01,Isolation Valve,Operations,450,false,true,Manual valve — no equip photo needed

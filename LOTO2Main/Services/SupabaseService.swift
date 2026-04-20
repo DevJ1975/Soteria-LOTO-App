@@ -250,6 +250,28 @@ final class SupabaseService {
         try validate(response, data)
     }
 
+    // MARK: - Rename Department
+
+    /// Patches every equipment row whose department matches `oldName`,
+    /// setting department to `newName` in a single bulk PATCH.
+    func renameDepartment(from oldName: String, to newName: String) async throws {
+        guard ConfigService.shared.isFullyConfigured else { throw SupabaseError.notConfigured }
+        guard !oldName.isEmpty, !newName.isEmpty, oldName != newName else { return }
+
+        let encoded   = oldName.addingPercentEncoding(withAllowedCharacters: .urlQueryValue) ?? oldName
+        let urlString = "\(base)/rest/v1/loto_equipment?department=eq.\(encoded)"
+        guard let url = URL(string: urlString) else { throw SupabaseError.invalidURL }
+
+        var request        = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+        addHeaders(&request)
+        request.httpBody   = try JSONSerialization.data(withJSONObject: ["department": newName])
+
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data)
+    }
+
     // MARK: - Upload PDF to Storage
 
     /// Uploads generated placard PDF to Supabase Storage, returns public URL.
@@ -274,6 +296,90 @@ final class SupabaseService {
         try validate(response, resData)
 
         return "\(base)/storage/v1/object/public/loto-photos/\(path)"
+    }
+
+    // MARK: - Import Equipment from CSV
+
+    /// Minimal row for inserting new equipment — only the columns the CSV provides.
+    /// All other columns use their Supabase DEFAULT values (false, "missing", etc.).
+    struct NewEquipmentRow: Encodable {
+        let equipmentId:      String
+        let description:      String
+        let department:       String
+        let prefix:           String
+        let needsEquipPhoto:  Bool
+        let needsIsoPhoto:    Bool
+        let notes:            String?
+        // Explicit safe defaults so no Supabase column is left ambiguous
+        private let hasEquipPhoto    = false
+        private let hasIsoPhoto      = false
+        private let photoStatus      = "missing"
+        private let needsVerification = false
+        private let verified         = false
+        private let spanishReviewed  = false
+
+        enum CodingKeys: String, CodingKey {
+            case equipmentId      = "equipment_id"
+            case description, department, prefix
+            case needsEquipPhoto  = "needs_equip_photo"
+            case needsIsoPhoto    = "needs_iso_photo"
+            case notes
+            case hasEquipPhoto    = "has_equip_photo"
+            case hasIsoPhoto      = "has_iso_photo"
+            case photoStatus      = "photo_status"
+            case needsVerification = "needs_verification"
+            case verified
+            case spanishReviewed  = "spanish_reviewed"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(equipmentId,      forKey: .equipmentId)
+            try c.encode(description,      forKey: .description)
+            try c.encode(department,       forKey: .department)
+            try c.encode(prefix,           forKey: .prefix)
+            try c.encode(needsEquipPhoto,  forKey: .needsEquipPhoto)
+            try c.encode(needsIsoPhoto,    forKey: .needsIsoPhoto)
+            try c.encodeIfPresent(notes,   forKey: .notes)   // omit key when nil
+            try c.encode(hasEquipPhoto,    forKey: .hasEquipPhoto)
+            try c.encode(hasIsoPhoto,      forKey: .hasIsoPhoto)
+            try c.encode(photoStatus,      forKey: .photoStatus)
+            try c.encode(needsVerification, forKey: .needsVerification)
+            try c.encode(verified,         forKey: .verified)
+            try c.encode(spanishReviewed,  forKey: .spanishReviewed)
+        }
+    }
+
+    /// Inserts new equipment rows in batches of 100. Caller must pre-filter
+    /// duplicates — this does a plain INSERT (no upsert) so conflicts will throw.
+    /// Returns the count of rows sent (all succeed or the whole batch throws).
+    func insertEquipment(_ rows: [NewEquipmentRow]) async throws -> Int {
+        guard ConfigService.shared.isFullyConfigured else { throw SupabaseError.notConfigured }
+        guard !rows.isEmpty else { return 0 }
+
+        var inserted = 0
+        let batchSize = 100
+        var offset    = 0
+
+        while offset < rows.count {
+            let batch = Array(rows[offset ..< min(offset + batchSize, rows.count)])
+
+            let urlString = "\(base)/rest/v1/loto_equipment"
+            guard let url = URL(string: urlString) else { throw SupabaseError.invalidURL }
+
+            var request        = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+            addHeaders(&request)
+            request.httpBody   = try JSONEncoder().encode(batch)
+
+            let (data, response) = try await session.data(for: request)
+            try validate(response, data)
+
+            inserted += batch.count
+            offset   += batchSize
+        }
+        return inserted
     }
 
     // MARK: - Private

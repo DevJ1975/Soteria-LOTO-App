@@ -27,8 +27,8 @@ struct PlacardFormView: View {
     @State private var showEquipCamera   = false
     @State private var showIsoCamera     = false
 
-    // Re-shoot confirmation
-    @State private var reshootTarget:    PhotoTarget? = nil
+    // Photo source selection (camera vs library)
+    @State private var photoSourceTarget: PhotoTarget? = nil
 
     // Preview sheet
     @State private var showPreview       = false
@@ -109,24 +109,24 @@ struct PlacardFormView: View {
                 Text("Less than 100 MB of storage is available. Photos may fail to save. Free up space on the iPad before continuing.")
             }
             .confirmationDialog(
-                "A photo already exists for this equipment. Replace it?",
+                "Select Photo Source",
                 isPresented: Binding(
-                    get: { reshootTarget != nil },
-                    set: { if !$0 { reshootTarget = nil } }
+                    get: { photoSourceTarget != nil },
+                    set: { if !$0 { photoSourceTarget = nil } }
                 ),
                 titleVisibility: .visible
             ) {
-                Button("Take New Photo") {
-                    if reshootTarget == .equipment { showEquipCamera = true }
+                Button("Take Photo") {
+                    if photoSourceTarget == .equipment { showEquipCamera = true }
                     else { showIsoCamera = true }
-                    reshootTarget = nil
+                    photoSourceTarget = nil
                 }
                 Button("Choose from Library") {
-                    if reshootTarget == .equipment { showEquipPicker = true }
+                    if photoSourceTarget == .equipment { showEquipPicker = true }
                     else { showIsoPicker = true }
-                    reshootTarget = nil
+                    photoSourceTarget = nil
                 }
-                Button("Cancel", role: .cancel) { reshootTarget = nil }
+                Button("Cancel", role: .cancel) { photoSourceTarget = nil }
             }
         }
         .overlay {
@@ -240,9 +240,14 @@ struct PlacardFormView: View {
 
             Divider().frame(height: 44)
 
-            Text(formattedDate())
-                .font(.system(size: 9)).foregroundStyle(.black)
-                .frame(width: 80).multilineTextAlignment(.center)
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")")
+                    .font(.system(size: 7, weight: .bold)).foregroundStyle(.black)
+                Text(formattedDate())
+                    .font(.system(size: 8)).foregroundStyle(.black)
+            }
+            .frame(width: 80)
+            .padding(.trailing, 4)
         }
         .frame(height: 44)
         .background(Color(red: 1, green: 0.85, blue: 0))
@@ -420,13 +425,7 @@ struct PlacardFormView: View {
         let displayImage = newImage ?? existingImage
 
         return Button {
-            if hasUploaded && newImage == nil {
-                // Already has an uploaded photo — confirm before replacing
-                reshootTarget = target
-            } else {
-                if target == .equipment { showEquipCamera = true }
-                else { showIsoCamera = true }
-            }
+            photoSourceTarget = target
         } label: {
             VStack(spacing: 0) {
                 ZStack(alignment: .topTrailing) {
@@ -476,6 +475,8 @@ struct PlacardFormView: View {
                             Image(systemName: "checkmark.icloud.fill")
                                 .font(.caption).foregroundStyle(Color.statusSuccess)
                                 .padding(6)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .padding(4)
                         }
                     }
                 }
@@ -583,13 +584,56 @@ struct PlacardFormView: View {
     // MARK: - Signature Bar
 
     private var signatureBar: some View {
-        HStack(spacing: 0) {
-            ForEach(["Signature: _______________", "Date: _______________",
-                     "Dept: _______________", "See PM Store in PT Folder"], id: \.self) { l in
-                Text(l).font(.system(size: 7)).frame(maxWidth: .infinity).padding(.vertical, 6)
+        let signOff = vm.departmentSignOffs[equipment.department]
+        let isSigned = signOff != nil
+
+        return HStack(spacing: 0) {
+            // Column 1: drawn signature image or supervisor name or placeholder
+            if let img = signOff?.signatureData.flatMap({ UIImage(data: $0) }) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("SIGNATURE:")
+                        .font(.system(size: 5.5)).foregroundStyle(.secondary)
+                    Image(uiImage: img)
+                        .resizable().scaledToFit()
+                        .frame(maxHeight: 28)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 4).padding(.vertical, 3)
+            } else {
+                Text(signOff.map { "Signature: \($0.supervisorName)" } ?? "Signature: _______________")
+                    .font(.system(size: 7, weight: isSigned ? .bold : .regular))
+                    .frame(maxWidth: .infinity).padding(.vertical, 6).padding(.horizontal, 4)
             }
+
+            Divider()
+
+            // Column 2: date
+            let dateStr: String = {
+                if let d = signOff?.date {
+                    return "Date: \(Self.dateFormatter.string(from: d))"
+                }
+                return "Date: _______________"
+            }()
+            Text(dateStr)
+                .font(.system(size: 7, weight: isSigned ? .bold : .regular))
+                .frame(maxWidth: .infinity).padding(.vertical, 6).padding(.horizontal, 4)
+
+            Divider()
+
+            // Column 3: department
+            Text("Dept: \(equipment.department)")
+                .font(.system(size: 7, weight: isSigned ? .bold : .regular))
+                .frame(maxWidth: .infinity).padding(.vertical, 6).padding(.horizontal, 4)
+
+            Divider()
+
+            // Column 4: reference
+            Text("See PM Store in PT Folder")
+                .font(.system(size: 7)).frame(maxWidth: .infinity).padding(.vertical, 6).padding(.horizontal, 4)
         }
-        .background(Color(UIColor.systemGray6))
+        .background(isSigned
+            ? Color(red: 0.85, green: 0.97, blue: 0.87)   // subtle green tint when signed
+            : Color(UIColor.systemGray6))
         .overlay(Rectangle().strokeBorder(.black.opacity(0.3), lineWidth: 0.5))
     }
 

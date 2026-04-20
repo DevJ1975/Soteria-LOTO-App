@@ -43,7 +43,9 @@ struct BatchPrintView: View {
                 // Info
                 if !selectedDepartment.isEmpty {
                     Section("Batch Info") {
-                        let deptItems  = vm.allEquipment.filter { $0.department == selectedDepartment }
+                        let deptItems  = vm.allEquipment.filter {
+                            $0.department == selectedDepartment && !vm.isDecommissioned($0)
+                        }
                         let count      = deptItems.count
                         let withPhotos = deptItems.filter {
                             PhotoStorageService.shared.hasLocal(equipment: $0, type: .equipment) ||
@@ -52,6 +54,19 @@ struct BatchPrintView: View {
                         LabeledContent("Equipment items",  value: "\(count)")
                         LabeledContent("With local photos", value: "\(withPhotos) of \(count)")
                         LabeledContent("Output", value: "\(count)-page PDF with available photos")
+                        if let signOff = vm.departmentSignOffs[selectedDepartment] {
+                            LabeledContent("Signed Off") {
+                                Label(signOff.supervisorName, systemImage: "checkmark.seal.fill")
+                                    .foregroundStyle(Color.statusSuccess)
+                                    .font(.caption)
+                            }
+                        } else {
+                            LabeledContent("Sign-Off") {
+                                Text("Not signed off")
+                                    .foregroundStyle(.secondary)
+                                    .font(.caption)
+                            }
+                        }
                     }
                 }
 
@@ -118,8 +133,10 @@ struct BatchPrintView: View {
         errorMessage = nil
         defer { isGenerating = false }
 
-        let items = vm.allEquipment.filter { $0.department == selectedDepartment }
-            .sorted { $0.equipmentId < $1.equipmentId }
+        let items   = vm.allEquipment.filter {
+            $0.department == selectedDepartment && !vm.isDecommissioned($0)
+        }.sorted { $0.equipmentId < $1.equipmentId }
+        let signOff = vm.departmentSignOffs[selectedDepartment]
 
         guard !items.isEmpty else {
             errorMessage = "No equipment found in this department."
@@ -130,7 +147,7 @@ struct BatchPrintView: View {
         // Photos are loaded lazily per-item inside buildCombinedPDF so we never
         // hold an entire department's worth of UIImages in memory at the same time.
         let combined = await Task.detached(priority: .userInitiated) {
-            await buildCombinedPDF(items: items)
+            await buildCombinedPDF(items: items, signOff: signOff)
         }.value
 
         // Sanitize department name — a raw "/" would corrupt the temp path
@@ -151,10 +168,14 @@ struct BatchPrintView: View {
     // PDFGenerator is @MainActor, so each page hops to main; the outer Task is
     // detached to prevent the call-site from blocking the SwiftUI render loop.
     @MainActor
-    private func buildCombinedPDF(items: [Equipment]) -> Data {
+    private func buildCombinedPDF(items: [Equipment],
+                                   signOff: PlacardViewModel.DepartmentSignOff? = nil) -> Data {
         let pageSize = CGSize(width: 792, height: 612)
         let pageRect = CGRect(origin: .zero, size: pageSize)
         let renderer = UIGraphicsPDFRenderer(bounds: pageRect)
+
+        // Decode signature image once — same for every item in the department
+        let sigImg = signOff?.signatureData.flatMap { UIImage(data: $0) }
 
         return renderer.pdfData { ctx in
             for equipment in items {
@@ -168,7 +189,10 @@ struct BatchPrintView: View {
                 let pageData = PDFGenerator.shared.generate(
                     equipment: equipment,
                     equipmentPhoto: equip,
-                    disconnectPhoto: iso
+                    disconnectPhoto: iso,
+                    supervisorName: signOff?.supervisorName,
+                    signOffDate: signOff?.date,
+                    signatureImage: sigImg
                 )
 
                 // Draw the English page (index 0) directly into the PDF context —
@@ -179,10 +203,14 @@ struct BatchPrintView: View {
                     let b = page.bounds(for: .mediaBox)
                     let pdfCtx = ctx.cgContext
                     pdfCtx.saveGState()
-                    if b.width > 0, b.height > 0 {
-                        pdfCtx.scaleBy(x: pageRect.width / b.width,
-                                       y: pageRect.height / b.height)
-                    }
+                    let scaleX = b.width  > 0 ? pageRect.width  / b.width  : 1
+                    let scaleY = b.height > 0 ? pageRect.height / b.height : 1
+                    // drawPDFPage uses PDF coordinates (origin bottom-left) but
+                    // UIGraphicsPDFRenderer uses UIKit coordinates (origin top-left).
+                    // Translate to the bottom edge of the destination then flip Y
+                    // so the content renders right-side up.
+                    pdfCtx.translateBy(x: 0, y: pageRect.height)
+                    pdfCtx.scaleBy(x: scaleX, y: -scaleY)
                     pdfCtx.drawPDFPage(cgPage)
                     pdfCtx.restoreGState()
                 }

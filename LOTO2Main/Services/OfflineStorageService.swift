@@ -81,6 +81,12 @@ final class OfflineStorageService {
         isoPhoto: Data?,
         pdf: Data?
     ) {
+        // Replace any existing entry for this equipment so tapping Upload twice
+        // while offline doesn't queue the same photos twice.
+        if let existing = pendingUploads.first(where: { $0.equipmentId == equipmentId }) {
+            remove(id: existing.id)
+        }
+
         let id = UUID()
         let record = PendingUpload(
             id: id,
@@ -127,13 +133,18 @@ final class OfflineStorageService {
         let snapshot = pendingUploads
 
         for upload in snapshot {
+            // Stop immediately if we've gone offline mid-flush
             guard NetworkMonitor.shared.isConnected else { break }
             do {
                 try await uploadPending(upload)
                 remove(id: upload.id)
             } catch {
-                // Leave it in the queue — will retry on next reconnect
-                break
+                // A Supabase-level error (bad data, server error, etc.) should NOT
+                // block every item behind this one. Skip it and attempt the rest.
+                // A network error is detected by the isConnected guard on the next
+                // iteration, which will break the loop cleanly.
+                // Do NOT remove failed items — they stay in queue for the next flush.
+                continue
             }
         }
     }

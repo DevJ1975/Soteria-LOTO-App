@@ -15,11 +15,26 @@ struct EquipmentListView: View {
     @State private var selectedDepartment: String?
     @State private var selectedEquipment:  Equipment?
     @State private var showBatchPrint      = false
+    @State private var showImportCSV       = false
+    @State private var showStatusReport    = false
+    @State private var showAddEquipment    = false
+    @State private var exportCSVURL:       URL?     = nil
+    @State private var showExportShare     = false
     @State private var columnVisibility    = NavigationSplitViewVisibility.all
     @State private var statusFilter:         StatusFilter = .all
     @State private var sortOrder:            SortOrder    = .equipmentId
     @State private var flaggedIDs:           Set<String>  = []   // session-only follow-up flags
     @State private var showDecommissioned:   Bool         = false
+    @State private var showSignOff:          Bool         = false
+    @State private var signOffName:          String       = ""
+    @State private var signOffDate:          Date         = Date()
+    @State private var signatureImage:       UIImage?     = nil   // drawn signature for sign-off sheet
+    @State private var clearSignalId:        UUID         = UUID() // changing this recreates the canvas
+    @State private var signOffDepartment:    String?      = nil   // dept being signed off (independent of selection)
+    @State private var renameDepartment:     String?      = nil   // dept being renamed
+    @State private var renameNewName:        String       = ""
+    @State private var renameError:          String?      = nil
+    @State private var isRenaming:           Bool         = false
 
     // MARK: - Enums
 
@@ -57,6 +72,21 @@ struct EquipmentListView: View {
         }
         .sheet(isPresented: $showBatchPrint) {
             BatchPrintView().environment(vm)
+        }
+        .sheet(isPresented: $showImportCSV) {
+            CSVImportView().environment(vm)
+        }
+        .sheet(isPresented: $showStatusReport) {
+            StatusReportView().environment(vm)
+        }
+        .sheet(isPresented: $showAddEquipment) {
+            AddEquipmentView().environment(vm)
+        }
+        .sheet(isPresented: $showExportShare) {
+            if let url = exportCSVURL { ShareSheet(url: url) }
+        }
+        .sheet(isPresented: $showSignOff) {
+            signOffSheet
         }
         .tint(Color.brandDeepIndigo)
     }
@@ -121,7 +151,7 @@ struct EquipmentListView: View {
             // "All" option
             Label("All Equipment", systemImage: "list.bullet")
                 .tag(String?.none as String?)
-                .badge(vm.allEquipment.count)
+                .badge(vm.countActive)
 
             // Per-department with progress bars
             Section("Departments") {
@@ -166,16 +196,58 @@ struct EquipmentListView: View {
         .navigationTitle("LOTO Placard")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { showBatchPrint = true } label: {
-                    Image(systemName: "printer")
+            // Sign Off button — shown in the sidebar when a department is selected
+            if let dept = selectedDepartment {
+                ToolbarItem(placement: .topBarLeading) {
+                    let isSigned = vm.departmentSignOffs[dept] != nil
+                    Button { openSignOff(for: dept) } label: {
+                        Label(
+                            isSigned ? "Signed Off" : "Sign Off",
+                            systemImage: isSigned ? "checkmark.seal.fill" : "signature"
+                        )
+                        .foregroundStyle(isSigned ? Color.statusSuccess : Color.brandDeepIndigo)
+                    }
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button { Task { await vm.loadEquipment() } } label: {
-                    Image(systemName: "arrow.clockwise")
+                Menu {
+                    Button {
+                        showBatchPrint = true
+                    } label: {
+                        Label("Batch Print PDF", systemImage: "printer")
+                    }
+                    Button {
+                        showImportCSV = true
+                    } label: {
+                        Label("Import from CSV", systemImage: "square.and.arrow.down")
+                    }
+                    Divider()
+                    Button {
+                        showStatusReport = true
+                    } label: {
+                        Label("Status Report", systemImage: "chart.bar.doc.horizontal")
+                    }
+                    Button {
+                        exportCSVURL = vm.exportEquipmentCSV()
+                        showExportShare = true
+                    } label: {
+                        Label("Export Equipment CSV", systemImage: "arrow.up.doc")
+                    }
+                    Button {
+                        showAddEquipment = true
+                    } label: {
+                        Label("Add Equipment", systemImage: "plus.circle")
+                    }
+                    Divider()
+                    Button {
+                        Task { await vm.loadEquipment() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(vm.loadState == .loading)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
-                .disabled(vm.loadState == .loading)
             }
             if offline.pendingCount > 0 {
                 ToolbarItem(placement: .topBarLeading) {
@@ -218,7 +290,21 @@ struct EquipmentListView: View {
             prompt: "Search equipment"
         )
         .toolbar {
-            // Sort toggle (#8)
+            // Sign-off button — visible only when a department is selected
+            if let dept = selectedDepartment {
+                ToolbarItem(placement: .topBarLeading) {
+                    let isSigned = vm.departmentSignOffs[dept] != nil
+                    Button { openSignOff(for: dept) } label: {
+                        Label(
+                            isSigned ? "Signed Off" : "Sign Off",
+                            systemImage: isSigned ? "checkmark.seal.fill" : "signature"
+                        )
+                        .foregroundStyle(isSigned ? Color.statusSuccess : Color.brandDeepIndigo)
+                    }
+                }
+            }
+
+            // Sort toggle
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Picker("Sort by", selection: $sortOrder) {
@@ -524,15 +610,21 @@ struct EquipmentListView: View {
     // MARK: - Department Row with Progress
 
     private func departmentRow(_ dept: String) -> some View {
-        let items    = vm.allEquipment.filter { $0.department == dept }
-        let total    = items.count
-        let complete = items.filter { $0.photoStatus == "complete" }.count
+        // O(1) lookups — precomputed in rebuildGroupedCache(), active items only
+        let total    = vm.deptActiveCounts[dept]   ?? 0
+        let complete = vm.deptCompleteCounts[dept] ?? 0
         let progress = total > 0 ? Double(complete) / Double(total) : 0
+        let signOff  = vm.departmentSignOffs[dept]
 
         return VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 4) {
                 Label(dept, systemImage: "building.2")
                     .font(.subheadline)
+                if signOff != nil {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.caption2)
+                        .foregroundStyle(Color.statusSuccess)
+                }
                 Spacer()
                 Text("\(complete)/\(total)")
                     .font(.caption2)
@@ -541,14 +633,79 @@ struct EquipmentListView: View {
             ProgressView(value: progress)
                 .tint(progress == 1 ? Color.statusSuccess : Color.brandDeepIndigo)
                 .scaleEffect(x: 1, y: 0.7)
+            if let s = signOff {
+                Text("Signed off by \(s.supervisorName)")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.statusSuccess)
+            }
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            Button { openSignOff(for: dept) } label: {
+                Label(
+                    signOff != nil ? "Update Sign-Off…" : "Sign Off Department…",
+                    systemImage: "signature"
+                )
+            }
+            if signOff != nil {
+                Button(role: .destructive) {
+                    vm.clearSignOff(department: dept)
+                } label: {
+                    Label("Clear Sign-Off", systemImage: "xmark.seal")
+                }
+            }
+            Divider()
+            Button {
+                renameNewName    = dept
+                renameError      = nil
+                renameDepartment = dept
+            } label: {
+                Label("Rename Department…", systemImage: "pencil")
+            }
+        }
+        .alert("Rename Department", isPresented: Binding(
+            get: { renameDepartment != nil },
+            set: { if !$0 { renameDepartment = nil; renameError = nil } }
+        )) {
+            TextField("New name", text: $renameNewName)
+                .autocorrectionDisabled()
+            if let err = renameError {
+                Text(err).foregroundStyle(.red)
+            }
+            Button("Rename", role: .none) {
+                guard let old = renameDepartment else { return }
+                let new = renameNewName.trimmingCharacters(in: .whitespaces)
+                guard !new.isEmpty, new != old else {
+                    renameDepartment = nil; return
+                }
+                isRenaming = true
+                Task {
+                    do {
+                        try await vm.renameDepartment(from: old, to: new)
+                        if selectedDepartment == old { selectedDepartment = new }
+                        renameDepartment = nil
+                    } catch {
+                        renameError = error.localizedDescription
+                    }
+                    isRenaming = false
+                }
+            }
+            .disabled(isRenaming)
+            Button("Cancel", role: .cancel) {
+                renameDepartment = nil
+                renameError      = nil
+            }
+        } message: {
+            if let old = renameDepartment {
+                Text("Rename \"\(old)\" — this updates all equipment in this department.")
+            }
+        }
     }
 
     // MARK: - Completion Summary Card (#7)
 
     private var completionCard: some View {
-        let total     = vm.allEquipment.count
+        let total     = vm.countActive   // excludes decommissioned
         let done      = vm.countComplete
         let remaining = total - done
         let pct       = total > 0 ? Int(Double(done) / Double(total) * 100) : 0
@@ -565,9 +722,10 @@ struct EquipmentListView: View {
             }
             ProgressView(value: Double(done), total: Double(max(total, 1)))
                 .tint(pct == 100 ? Color.statusSuccess : Color.brandDeepIndigo)
-            Text(remaining > 0
-                 ? "\(done) of \(total) complete — \(remaining) remaining"
-                 : "All \(total) placards complete")
+            Text(total == 0     ? "No active equipment"
+                 : remaining > 0
+                   ? "\(done) of \(total) complete — \(remaining) remaining"
+                   : "All \(total) placards complete")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -578,7 +736,7 @@ struct EquipmentListView: View {
 
     private var statsRow: some View {
         HStack(spacing: 0) {
-            statCell(value: vm.allEquipment.count, label: "Total",   color: Color.brandDeepIndigo)
+            statCell(value: vm.countActive,         label: "Total",   color: Color.brandDeepIndigo)
             Divider().frame(height: 28)
             statCell(value: vm.countComplete,      label: "Done",    color: Color.statusSuccess)
             Divider().frame(height: 28)
@@ -595,6 +753,101 @@ struct EquipmentListView: View {
             Text(label).font(.caption2).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    // MARK: - Sign-Off Sheet
+
+    private var signOffSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Supervisor Name") {
+                    TextField("Full Name", text: $signOffName)
+                        .autocorrectionDisabled()
+                }
+                Section("Sign-Off Date") {
+                    DatePicker("Date", selection: $signOffDate, displayedComponents: .date)
+                        .datePickerStyle(.compact)
+                }
+
+                // Signature drawing section
+                Section("Signature") {
+                    // Show the current/previously-drawn signature as a preview
+                    if let img = signatureImage {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Current signature — draw below to replace")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxHeight: 56)
+                                .cornerRadius(6)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
+                                )
+                        }
+                    }
+
+                    // Canvas for drawing a new signature
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(signatureImage != nil ? "Draw new signature:" : "Draw signature:")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        SignatureCanvasView { img in
+                            // Only update when a new stroke completes — preserve existing if canvas cleared
+                            if let img { signatureImage = img }
+                        }
+                        .id(clearSignalId)   // changing the ID recreates the UIView (clears canvas)
+                        .frame(height: 100)
+                    }
+
+                    // Clear the drawn signature entirely
+                    if signatureImage != nil {
+                        Button("Clear Signature", role: .destructive) {
+                            signatureImage = nil
+                            clearSignalId  = UUID()
+                        }
+                    }
+                }
+
+                if let dept = signOffDepartment,
+                   let existing = vm.departmentSignOffs[dept] {
+                    Section {
+                        HStack {
+                            Image(systemName: "checkmark.seal.fill")
+                                .foregroundStyle(Color.statusSuccess)
+                            Text("Currently signed off by \(existing.supervisorName)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Clear Sign-Off", role: .destructive) {
+                            vm.clearSignOff(department: dept)
+                            showSignOff = false
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Sign Off: \(signOffDepartment ?? "")")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { showSignOff = false }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Apply") {
+                        guard let dept = signOffDepartment else { return }
+                        let name = signOffName.trimmingCharacters(in: .whitespaces)
+                        guard !name.isEmpty else { return }
+                        vm.signOff(department: dept, supervisorName: name,
+                                   date: signOffDate, signatureImage: signatureImage)
+                        showSignOff = false
+                    }
+                    .fontWeight(.semibold)
+                    .disabled(signOffName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
     }
 
     // MARK: - Empty Detail
@@ -648,6 +901,16 @@ struct EquipmentListView: View {
         case "partial":  return Color.statusWarning
         default:         return Color.statusError
         }
+    }
+
+    /// Populates sign-off sheet state and opens the sheet for a given department.
+    private func openSignOff(for dept: String) {
+        signOffDepartment = dept
+        signOffName       = vm.departmentSignOffs[dept]?.supervisorName ?? ""
+        signOffDate       = vm.departmentSignOffs[dept]?.date ?? Date()
+        signatureImage    = vm.departmentSignOffs[dept]?.signatureData.flatMap { UIImage(data: $0) }
+        clearSignalId     = UUID()
+        showSignOff       = true
     }
 }
 
